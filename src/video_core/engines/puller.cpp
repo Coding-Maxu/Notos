@@ -80,8 +80,17 @@ bool MetByQueuedRelease(DmaPusher& dma_pusher, const Puller::PendingAcquire& acq
     if (!device) {
         return false;
     }
-    const auto payload = split.QueuedReleasePayload(*device, acquire.address);
+    u32 miss = 0;
+    const auto payload = split.QueuedReleasePayload(*device, acquire.address, &miss);
     if (!payload || !acquire.Matches(*payload)) {
+        if (VideoCommon::Nx2Profile::Enabled()) {
+            using Counter = VideoCommon::Nx2Profile::Counter;
+            VideoCommon::Nx2Profile::Add(miss == 1   ? Counter::AcquireNoRelease
+                                         : miss == 2 ? Counter::AcquireReleaseRan
+                                         : miss == 3 ? Counter::AcquireLaterWrite
+                                                     : Counter::AcquirePayloadMiss,
+                                         1);
+        }
         return false;
     }
     split.NoteSync();
@@ -327,6 +336,7 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
         }
         DrainBack();
         if (acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address))) {
+            VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireMetAfterDrain, 1);
             return;
         }
         // Registered before the fences run, so a release among them that meets the value counts

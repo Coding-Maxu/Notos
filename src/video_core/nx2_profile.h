@@ -118,7 +118,7 @@ inline constexpr std::array<const char*, static_cast<size_t>(DmaWaitCause::Count
 struct ThreadData {
     std::array<u64, static_cast<size_t>(Zone::Count)> exclusive_ns{};
     std::array<u64, static_cast<size_t>(Zone::Count)> count{};
-    std::array<u64, 16> counters{}; ///< See Counter
+    std::array<u64, 24> counters{}; ///< See Counter
     std::array<u64, static_cast<size_t>(DmaWaitCause::Count)> dma_wait_causes{};
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_ns{};
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_count{};
@@ -178,6 +178,11 @@ enum class Counter : u32 {
     PtrCacheMisses, ///< EDEN_NX2_HANDLE_PTR_CACHE: handle/descriptor reads, page looked up
     UboInPlaceSame, ///< EDEN_NX2_UBO_INPLACE: small uniform buffers unchanged, nothing copied
     UboInPlaceChanged, ///< EDEN_NX2_UBO_INPLACE: small uniform buffers changed, copied once
+    AcquireNoRelease,  ///< Drained acquires: no release of the word was sent this session
+    AcquireReleaseRan, ///< Drained acquires: the last release of the word already ran on the back
+    AcquireLaterWrite, ///< Drained acquires: work sent after its release may write the word
+    AcquirePayloadMiss, ///< Drained acquires: the queued release's payload does not meet it
+    AcquireMetAfterDrain, ///< Drained acquires met at once after the drain
     Count,
 };
 static_assert(static_cast<size_t>(Counter::Count) <= std::tuple_size_v<decltype(ThreadData::counters)>);
@@ -260,6 +265,19 @@ inline void Report(const char* thread_name = "GPU thread") {
     if (const u64 queued = data.counters[static_cast<size_t>(Counter::AcquiresQueued)]; queued != 0) {
         line += fmt::format(" | acquires met by a queued release {:.0f}",
                             static_cast<double>(queued) * 1e9 / window);
+    }
+    {
+        const auto rate = [&](Counter counter) {
+            return static_cast<double>(data.counters[static_cast<size_t>(counter)]) * 1e9 / window;
+        };
+        if (data.counters[static_cast<size_t>(Counter::AcquireChecks)] != 0) {
+            line += fmt::format(" | drained acquires: no release {:.0f}, release ran {:.0f}, "
+                                "later write {:.0f}, payload miss {:.0f}, met after drain {:.0f}",
+                                rate(Counter::AcquireNoRelease), rate(Counter::AcquireReleaseRan),
+                                rate(Counter::AcquireLaterWrite),
+                                rate(Counter::AcquirePayloadMiss),
+                                rate(Counter::AcquireMetAfterDrain));
+        }
     }
     if (const u64 fast = data.counters[static_cast<size_t>(Counter::AcquiresFast)]; fast != 0) {
         line += fmt::format(" | acquires without a drain {:.0f}",

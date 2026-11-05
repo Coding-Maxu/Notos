@@ -338,16 +338,22 @@ void GpuSplit::NoteRelease(u64 device, GPUVAddr address, u32 payload) {
     queued_releases[(device >> 2) % queued_releases.size()] = {write_position, device, payload};
 }
 
-std::optional<u32> GpuSplit::QueuedReleasePayload(u64 device, GPUVAddr address) {
+std::optional<u32> GpuSplit::QueuedReleasePayload(u64 device, GPUVAddr address, u32* miss) {
     const QueuedRelease& release = queued_releases[(device >> 2) % queued_releases.size()];
     const u64 done = consumed.load(std::memory_order_acquire);
-    if (release.device != device || release.position <= done || release.position == 0) {
+    if (release.device != device || release.position == 0) {
+        if (miss) *miss = 1;
+        return std::nullopt;
+    }
+    if (release.position <= done) {
+        if (miss) *miss = 2;
         return std::nullopt;
     }
     // Any write sent after the release (an unranged one, or a ranged one to the word) may change
     // the word before the acquire runs.
     u32 method{};
     if (MemoryWriterTarget(done, address, address + sizeof(u32), method) > release.position) {
+        if (miss) *miss = 3;
         return std::nullopt;
     }
     return release.payload;

@@ -281,7 +281,8 @@ public:
     /// For a semaphore acquire of `device`: the payload a release still queued for the back writes
     /// there, if nothing sent after it may write the word. The back runs the acquire's channel
     /// after that release, so an acquire it meets needs no drain. EDEN_NX2_ACQUIRE_QUEUED=0 off.
-    std::optional<u32> QueuedReleasePayload(u64 device, GPUVAddr address);
+    /// `miss` (when no payload): 1 no release recorded, 2 it already ran, 3 a later write.
+    std::optional<u32> QueuedReleasePayload(u64 device, GPUVAddr address, u32* miss = nullptr);
 
 private:
     enum class Kind : u64 {
