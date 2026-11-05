@@ -94,10 +94,26 @@ public:
     /// Returns true when copies were recorded, which ends the current render pass.
     bool BeginPass(const void* framebuffer, std::span<ImageView* const> colors);
     void NoteDraw(std::span<const u64> shader_hashes);
-    /// Starts counting the samples the draw about to be recorded passes; returns the query to end
-    /// after it. Sampled captures only, and not while the game counts samples itself.
+    /// Starts counting the primitives and fragments of the draw about to be recorded; returns the
+    /// query to end after it. Sampled captures only.
     std::optional<u32> BeginProbe();
-    void EndProbe(u32 query, bool mesh, bool indirect, u32 first, u32 elements, u32 instances);
+    struct Probe {
+        u32 draw;
+        bool mesh;
+        bool indirect;
+        u32 first;
+        u32 elements;
+        u32 instances;
+        u32 alpha_test; ///< Comparison op while the alpha test is enabled, else 0
+        f32 alpha_ref;
+        bool alpha_to_coverage;      ///< As the guest set it
+        bool host_alpha_to_coverage; ///< As last given to the host
+        bool color0;                 ///< The fragment program writes colour 0
+        bool kill;                   ///< The fragment program can discard
+        u32 zero_handles;            ///< Texture handles whose handle program gave 0
+    };
+    /// Ends the query; the draw index comes from BeginProbe.
+    void EndProbe(u32 query, Probe probe);
     /// Records a draw or dispatch dropped because its program or pipeline is unavailable.
     void NoteSkipped(bool compute, u64 program, GPUVAddr rt0, std::string_view reason);
     /// Captures the current pass; returns true when copies were recorded.
@@ -179,14 +195,6 @@ private:
     u64 frame{};
 
     std::ofstream manifest;
-    struct Probe {
-        u32 draw;
-        bool mesh;
-        bool indirect;
-        u32 first;
-        u32 elements;
-        u32 instances;
-    };
     static constexpr u32 MAX_PROBES = 8192;
     vk::QueryPool probe_pool;
     std::vector<Probe> probes;
@@ -201,6 +209,7 @@ private:
     std::vector<Target> pass_targets;
     std::vector<u64> pass_hashes;
     std::vector<std::pair<GPUVAddr, u32>> pass_sampled;
+    std::vector<std::pair<u32, u32>> pass_null_sampled; ///< Stage and TIC of views with no image
     /// (compute shader hash, image address, format/level/layer) already read back this frame.
     std::vector<std::tuple<u64, GPUVAddr, u32>> dispatch_sampled;
     /// (address, format, level, layer) of block-compressed textures already read back; the GPU

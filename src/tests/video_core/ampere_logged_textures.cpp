@@ -96,7 +96,7 @@ struct TextureTranslation {
             if ((word >> 48) == 0xe300) {
                 continue;
             }
-            REQUIRE(((word >> 16) & 15) == guard);
+            REQUIRE(((word >> 16) & 15) == ((word >> 56) == 0x01 ? 7U : guard));
             if ((word >> 48) == 0x5c98) {
                 visitor.MOV_reg(word);
             } else if ((word >> 56) == 0x01) {
@@ -406,6 +406,58 @@ TEST_CASE("Welcome Tour logged half textures reach production SPIRV emission",
     }
 }
 
+TEST_CASE("Guarded per-tap gathers retain immediate offsets through SPIRV translation",
+          "[video_core][ampere][gather][logged_textures]") {
+    for (const bool half : {false, true}) {
+        for (const u32 guard : {1U, 9U}) {
+            const std::array native{
+                Instruction{{0x000e7919, 0, 0x2100, 0}},
+                Instruction{{0x0e00720c, 0xff, 0x03f25070, 0}},
+                Instruction{{(0xff107424U & ~0xf000U) | (guard << 12), 0xfffeffff, 0x078e00ff, 0}},
+                Instruction{{(0xff117424U & ~0xf000U) | (guard << 12), 0xfffcfffd, 0x078e00ff, 0}},
+                Instruction{{(0x06187b63U & ~0xf000U) | (guard << 12), 0x30007c10,
+                             0x001e2f0eU | (half ? 1U << 15 : 0U), 0}},
+                Exit,
+            };
+            const auto lowered = Shader::Ampere::LowerToMaxwell(native);
+            INFO(lowered.error);
+            REQUIRE(lowered);
+            auto code = lowered.instructions;
+            for (const u32 reg : {14U, 24U})
+                code.insert(code.end() - 1, 0xef58000000070000ULL | reg | (255ULL << 8) |
+                    (u64{reg * 4} << 20) | (4ULL << 48));
+            TextureEnvironment env;
+            env.code = code;
+            env.binding = lowered.required_texture_buffer;
+            Shader::ObjectPool<Shader::Maxwell::Flow::Block> flow_pool;
+            Shader::Maxwell::Flow::CFG cfg{env, flow_pool, Shader::Maxwell::Location{0x50}};
+            Shader::ObjectPool<IR::Inst> inst_pool;
+            Shader::ObjectPool<IR::Block> block_pool;
+            Shader::HostTranslateInfo host;
+            host.ApplyDescriptorLimitPolicy();
+            auto program = Shader::Maxwell::TranslateProgram(inst_pool, block_pool, env, cfg, host);
+            u32 gathers = 0;
+            for (const auto* block : program.blocks) {
+                for (const auto& inst : *block) {
+                    if (inst.GetOpcode() != IR::Opcode::ImageGather) continue;
+                    ++gathers;
+                    for (const u32 argument : {2U, 3U}) {
+                        const auto* offsets = inst.Arg(argument).InstRecursive();
+                        REQUIRE(offsets->GetOpcode() == IR::Opcode::CompositeConstructU32x4);
+                        REQUIRE(offsets->AreAllArgsImmediates());
+                    }
+                }
+            }
+            REQUIRE(gathers == 1);
+            Shader::Profile profile{};
+            profile.supported_spirv = 0x00010400;
+            const auto spirv = Shader::Backend::SPIRV::EmitSPIRV(profile, program);
+            REQUIRE(spirv.size() > 5);
+            CHECK(spirv.front() == 0x07230203);
+        }
+    }
+}
+
 TEST_CASE("Half gathers reject reserved second coordinates before scratch copies",
           "[video_core][ampere][logged_textures]") {
     for (u32 source = 246; source < 255; ++source) {
@@ -443,4 +495,24 @@ TEST_CASE("Half gathers reject reserved second coordinates before scratch copies
             CHECK(static_cast<bool>(lowered) == (source < limit || source == 255));
         }
     }
+}
+
+TEST_CASE("Half per-tap gathers prove offsets across an unrelated LEA.HI",
+          "[video_core][ampere][gather][logged_textures]") {
+    // Ocarina of Time 1080p upscaler (native program at 0x11491edc00), nvdisasm -b SM87:
+    // LEA.HI R8, R8, R7, RZ, 0x1f ; between the offset moves and
+    // TLD4.SCR.R.F16.RN.PTP R12, R10, R10, R0, 0x0, 0x30, 2D ;
+    const Instruction lea{{0x08087211, 0x00000007, 0x078ff8ff, 0x000fc800}};
+    const Instruction gather{{0x0a0c7b63, 0x30003000, 0x001eaf0d, 0x000fc200}};
+    auto code = std::array{
+        Instruction{{0x00007802, 0xff00ff00, 0xf00, 0}},
+        Instruction{{0x00017802, 0x01000001, 0xf00, 0}},
+        lea, gather, Exit,
+    };
+    const auto lowered = Shader::Ampere::LowerToMaxwell(code);
+    INFO(lowered.error);
+    REQUIRE(lowered);
+    code[2].words[0] = 0x08017211;
+    CHECK(Shader::Ampere::LowerToMaxwell(code).error ==
+          "native per-tap gather nonconstant offsets");
 }
