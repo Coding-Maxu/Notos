@@ -608,9 +608,10 @@ bool MemoryManager::IsMemoryDirty(GPUVAddr gpu_addr, size_t size,
 }
 
 size_t MemoryManager::MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const {
-    // Native storage buffers ask this for up to 8 MiB on each bind, ~70,000 times a second in
-    // title 1's forest (17% of the GPU thread walking pages): keep answers per thread until the
-    // page table changes.
+    // Native storage buffers ask this for up to 8 MiB on each bind, and table pointers for up to
+    // 64 MiB, tens of thousands of times a second (13-17% of the GPU back thread walking pages):
+    // keep answers per thread until the page table changes. Keyed by address only: an answer
+    // for a size holds for any smaller size, as the run length capped at it.
     struct Entry {
         size_t owner;
         GPUVAddr gpu_addr;
@@ -618,12 +619,12 @@ size_t MemoryManager::MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const {
         u64 serial;
         size_t result;
     };
-    thread_local std::array<Entry, 64> cache{};
+    thread_local std::array<Entry, 1024> cache{};
     const u64 serial = map_serial.load(std::memory_order_acquire);
-    Entry& entry = cache[((gpu_addr ^ size) * 0x9E3779B97F4A7C15ULL) >> 58];
-    if (entry.owner == unique_identifier + 1 && entry.gpu_addr == gpu_addr && entry.size == size &&
-        entry.serial == serial) {
-        return entry.result;
+    Entry& entry = cache[(gpu_addr * 0x9E3779B97F4A7C15ULL) >> 54];
+    if (entry.owner == unique_identifier + 1 && entry.gpu_addr == gpu_addr &&
+        entry.serial == serial && size <= entry.size) {
+        return (std::min)(entry.result, size);
     }
     const size_t result = MaxContinuousRangeUncached(gpu_addr, size);
     entry = {unique_identifier + 1, gpu_addr, size, serial, result};
