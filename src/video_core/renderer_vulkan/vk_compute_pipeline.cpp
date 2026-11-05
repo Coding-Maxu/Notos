@@ -438,7 +438,11 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
         }
     }
 
-    if (RecordingSampledTextures()) {
+    static const bool record_sampled = [] {
+        const char* const value = std::getenv("EDEN_NX2_FRAME_DUMP_SAMPLED");
+        return value && *value != '\0' && *value != '0';
+    }();
+    if (record_sampled) {
         sampled_images.clear();
         const size_t first = Shader::NumDescriptors(info.texture_buffer_descriptors) +
                              Shader::NumDescriptors(info.image_buffer_descriptors);

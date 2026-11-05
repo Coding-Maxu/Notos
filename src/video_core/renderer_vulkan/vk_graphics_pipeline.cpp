@@ -544,7 +544,11 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         texture_cache.FillImageViews(std::span(views.data(), views.size()), false,
                                      Spec::has_images);
     }
-    if (RecordingSampledTextures()) {
+    static const bool record_sampled = [] {
+        const char* const value = std::getenv("EDEN_NX2_FRAME_DUMP_SAMPLED");
+        return value && *value != '\0' && *value != '0';
+    }();
+    if (record_sampled) {
         sampled_images.clear();
         size_t view_index{};
         size_t sampler_index{};
