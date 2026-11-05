@@ -1294,17 +1294,6 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
                 }
             },
             VideoCommon::DrainSite::MacroDmaFlush);
-    } else {
-        split.WaitForSyncedWriters(VideoCommon::DrainSite::MacroDmaRead);
-        split.WaitForSemaphore(source, VideoCommon::DrainSite::MacroDmaRead);
-    }
-    bool gpu_written = false;
-    for (GPUVAddr page = source & ~GPUVAddr{0xfff}; page < source + read_bytes; page += 0x1000) {
-        const auto device = memory_manager.GpuToCpuAddress(page);
-        if (device && Tegra::Nx2IsGpuWritten(*device)) {
-            gpu_written = true;
-            break;
-        }
     }
     flush_if_dirty();
     std::vector<u32> diag_before;
