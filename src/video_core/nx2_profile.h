@@ -70,11 +70,16 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "writer wait", "list submit wait", "list GPU wait",
 };
 
-// Read once at startup: Enabled() runs several times per method write (no guard to check).
-// Off while EDEN_NX2_SAMPLE_PROFILE samples (common/nx2_sample_profile.h): the zone timers would
-// show up in the samples.
-inline const bool g_enabled = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr &&
-                              std::getenv("EDEN_NX2_SAMPLE_PROFILE") == nullptr;
+// Read once, when the GPU thread starts (Initialize): Enabled() runs several times per method
+// write (no guard to check). Not at static initialization: nx2_switches.txt is only applied in
+// main(). Off while EDEN_NX2_SAMPLE_PROFILE samples (common/nx2_sample_profile.h): the zone timers
+// would show up in the samples.
+inline bool g_enabled = false;
+
+inline void Initialize() {
+    g_enabled = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr &&
+                std::getenv("EDEN_NX2_SAMPLE_PROFILE") == nullptr;
+}
 
 inline bool Enabled() {
     return g_enabled;
