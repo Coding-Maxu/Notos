@@ -98,22 +98,27 @@ bool MetByQueuedRelease(DmaPusher& dma_pusher, const Puller::PendingAcquire& acq
     return true;
 }
 
+// EDEN_NX2_ACQUIRE_PRECHECK=2: also while work is queued and on GPU-written pages. The word only
+// grows (GEQUAL semaphores count up), so guest memory, if older than a queued release or a cache,
+// holds a lower value: one that meets the acquire already, meets it then too. Only a write that
+// lowers the word (a reset) could make this wrong. Ocarina drained ~2,200 acquires a second that
+// were met at once.
 bool GequalMetWithoutDrain(DmaPusher& dma_pusher, GPUVAddr address, u32 value) {
-    static const bool enabled = [] {
+    static const int level = [] {
         const char* setting = std::getenv("EDEN_NX2_ACQUIRE_PRECHECK");
-        return setting != nullptr && setting[0] != '0';
+        return setting == nullptr ? 0 : setting[0] == '2' ? 2 : setting[0] != '0' ? 1 : 0;
     }();
     auto& split = VideoCommon::GpuSplit::Get();
-    if (!enabled || !split.Active()) {
+    if (level == 0 || !split.Active()) {
         return false;
     }
     auto& memory = dma_pusher.memory_manager;
     if (memory.OverlapsNativeSyncpointShim(address, sizeof(u32)) ||
-        split.HasQueuedMemoryWriters(address, address + sizeof(u32))) {
+        (level == 1 && split.HasQueuedMemoryWriters(address, address + sizeof(u32)))) {
         return false;
     }
     const auto device = memory.GpuToCpuAddress(address);
-    if (!device || Nx2IsGpuWritten(*device) || memory.Read<u32>(address) < value) {
+    if (!device || (level == 1 && Nx2IsGpuWritten(*device)) || memory.Read<u32>(address) < value) {
         return false;
     }
     split.NoteSync();
