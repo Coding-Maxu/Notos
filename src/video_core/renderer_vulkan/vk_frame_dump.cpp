@@ -236,6 +236,15 @@ FrameDump::FrameDump(const Device& device_, MemoryAllocator& memory_allocator_,
     enabled = true;
     const char* const sampled_value = std::getenv("EDEN_NX2_FRAME_DUMP_SAMPLED");
     sampled = sampled_value && *sampled_value != '\0' && *sampled_value != '0';
+    if (const char* const from = std::getenv("EDEN_NX2_FRAME_DUMP_SAMPLED_FROM")) {
+        sampled_from_pass = static_cast<u32>(std::strtoul(from, nullptr, 10));
+    }
+    size_cap = SIZE_CAP;
+    if (const char* const cap = std::getenv("EDEN_NX2_FRAME_DUMP_CAP_MIB")) {
+        if (const u64 mib = std::strtoull(cap, nullptr, 10); mib != 0) {
+            size_cap = static_cast<size_t>(mib) << 20;
+        }
+    }
     directory = dir;
     start = std::chrono::steady_clock::now();
     const char* const at = std::getenv("EDEN_NX2_FRAME_DUMP_AT");
@@ -421,6 +430,9 @@ bool FrameDump::RecordSampled(const Sampled& texture, u32 index, std::string nam
 
 bool FrameDump::NoteSampled(std::span<const Sampled> textures) {
     bool recorded = false;
+    if (pass_index < sampled_from_pass) {
+        return false;
+    }
     for (const Sampled& texture : textures) {
         const auto key = SampledKey(texture);
         if (!key) {
@@ -449,6 +461,9 @@ bool FrameDump::NoteSampled(std::span<const Sampled> textures) {
 }
 
 void FrameDump::NoteDispatchSampled(u64 shader_hash, std::span<const Sampled> textures) {
+    if (pass_index < sampled_from_pass) {
+        return;
+    }
     for (u32 index = 0; index < textures.size(); ++index) {
         const Sampled& texture = textures[index];
         const auto key = SampledKey(texture);
@@ -610,7 +625,7 @@ bool FrameDump::Record(const Target& target, std::string name, std::string tags)
         return false;
     }
     const size_t size = TargetBytes(target);
-    if (recorded_bytes + size > SIZE_CAP) {
+    if (recorded_bytes + size > size_cap) {
         truncated = true;
         return false;
     }
@@ -664,7 +679,7 @@ bool FrameDump::Record(const Target& target, std::string name, std::string tags)
 }
 
 bool FrameDump::RecordBuffer(VkBuffer source, u32 offset, u32 size, std::string tags) {
-    if (recorded_bytes + size > SIZE_CAP) {
+    if (recorded_bytes + size > size_cap) {
         truncated = true;
         return false;
     }
@@ -762,7 +777,7 @@ void FrameDump::WriterLoop() {
             manifest.close();
             LOG_INFO(Render_Vulkan, "Frame dump done: {} images, {}, {} MiB in {}{}", images,
                      job.tags, written_bytes >> 20, directory.string(),
-                     job.truncated ? fmt::format(" (stopped at the {} GiB cap)", SIZE_CAP >> 30)
+                     job.truncated ? fmt::format(" (stopped at the {} MiB cap)", size_cap >> 20)
                                    : "");
             continue;
         }

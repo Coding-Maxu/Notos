@@ -184,6 +184,10 @@ private:
 
     bool enabled{};
     bool sampled{};
+    /// EDEN_NX2_FRAME_DUMP_SAMPLED_FROM: passes before this one do not read back sampled textures.
+    u32 sampled_from_pass{};
+    /// EDEN_NX2_FRAME_DUMP_CAP_MIB: read-back budget for one capture.
+    size_t size_cap{};
     bool capturing{};
     bool done{};
     bool truncated{};
