@@ -272,7 +272,7 @@ bool GpuSplit::WaitForSync() {
     return WaitFor(std::min(last_sync_position, write_position), DrainSite::ListSync);
 }
 
-void GpuSplit::RangeLastWrite(GPUVAddr begin, GPUVAddr end) {
+void GpuSplit::RangeLastWrite(GPUVAddr begin, GPUVAddr end, const u32* data, size_t space) {
     static const bool enabled = [] {
         const char* const value = std::getenv("EDEN_NX2_RANGED_WAITS");
         return value == nullptr || value[0] != '0';
@@ -284,6 +284,14 @@ void GpuSplit::RangeLastWrite(GPUVAddr begin, GPUVAddr end) {
     const u32 method = last_memory_write_method;
     last_memory_write_position = previous_memory_write_position;
     last_memory_write_method = previous_memory_write_method;
+    static const bool forward = [] {
+        const char* const value = std::getenv("EDEN_NX2_FORWARD_READS");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (!forward) {
+        data = nullptr;
+    }
+    const size_t words = static_cast<size_t>(end - begin) / sizeof(u32);
     // Consecutive uploads continue one range (each word may use another of the 16 data methods).
     if (!ranged_writes.empty()) {
         RangedWrite& last = ranged_writes.back();
@@ -291,6 +299,13 @@ void GpuSplit::RangeLastWrite(GPUVAddr begin, GPUVAddr end) {
             last.end = end;
             last.position = write_position;
             last.method = method;
+            if (data != nullptr && last.space == space && space != 0 &&
+                last.data.size() * sizeof(u32) == static_cast<size_t>(begin - last.begin)) {
+                last.data.insert(last.data.end(), data, data + words);
+            } else {
+                last.space = 0;
+                last.data.clear();
+            }
             return;
         }
     }
@@ -303,7 +318,36 @@ void GpuSplit::RangeLastWrite(GPUVAddr begin, GPUVAddr end) {
         }
         ranged_writes.pop_front();
     }
-    ranged_writes.push_back({write_position, begin, end, method});
+    RangedWrite& write = ranged_writes.emplace_back(RangedWrite{write_position, begin, end, method, 0, {}});
+    if (data != nullptr && space != 0 && (end - begin) % sizeof(u32) == 0) {
+        write.space = space;
+        write.data.assign(data, data + words);
+    }
+}
+
+bool GpuSplit::ForwardRead(size_t space, GPUVAddr begin, u32 words, u32* out) {
+    const GPUVAddr end = begin + GPUVAddr{words} * sizeof(u32);
+    const u64 done = consumed.load(std::memory_order_acquire);
+    u32 method{};
+    const u64 target = MemoryWriterTarget(done, begin, end, method);
+    if (target <= done) {
+        return false; // Nothing to wait for: memory holds the words
+    }
+    // The newest overlapping write; the deque is in send order.
+    for (auto it = ranged_writes.rbegin(); it != ranged_writes.rend(); ++it) {
+        if (!(it->begin < end && begin < it->end)) {
+            continue;
+        }
+        if (it->position != target || it->space != space || space == 0 || begin < it->begin ||
+            end > it->end || (begin - it->begin) % sizeof(u32) != 0 ||
+            it->data.size() * sizeof(u32) != static_cast<size_t>(it->end - it->begin)) {
+            return false;
+        }
+        std::memcpy(out, it->data.data() + (begin - it->begin) / sizeof(u32),
+                    size_t{words} * sizeof(u32));
+        return true;
+    }
+    return false;
 }
 
 u64 GpuSplit::MemoryWriterTarget(u64 done, GPUVAddr begin, GPUVAddr end, u32& target_method) {

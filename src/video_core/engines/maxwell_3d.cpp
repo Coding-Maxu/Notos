@@ -1066,7 +1066,10 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
         }
     }
     if (write_end != 0) {
-        split.RangeLastWrite(write_begin, write_end);
+        constexpr u32 cb_data = MAXWELL3D_REG_INDEX(const_buffer.buffer);
+        const bool upload = method >= cb_data && method < cb_data + 16;
+        split.RangeLastWrite(write_begin, write_end, upload ? &value : nullptr,
+                             memory_manager.GetID() + 1);
         if (method == MAXWELL3D_REG_INDEX(report_semaphore.query)) {
             FrontNoteRelease(split, fs, value);
         }
@@ -1218,7 +1221,12 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
     }
     split.MultiMethod(this, method, base_start, amount, methods_pending, nullptr);
     if (write_end != 0) {
-        split.RangeLastWrite(write_begin, write_end);
+        // Uploaded words, unless the shadow RAM replays other values for them on the back.
+        constexpr u32 cb_data = MAXWELL3D_REG_INDEX(const_buffer.buffer);
+        const bool upload = method >= cb_data && method < cb_data + 16 &&
+                            fs.control != Regs::ShadowRamControl::Replay;
+        split.RangeLastWrite(write_begin, write_end, upload ? base_start : nullptr,
+                             memory_manager.GetID() + 1);
         if (method == MAXWELL3D_REG_INDEX(report_semaphore.query) && amount == 1) {
             FrontNoteRelease(split, fs, base_start[0]);
         }
@@ -1299,6 +1307,24 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
                 VideoCommon::DrainSite::MacroDmaFlush);
         }
     };
+    // Words a constant buffer upload still queued for the back writes come from the upload
+    // itself (9,600 waits a second in Ocarina's forest).
+    if (!full_drain && !Tegra::Nx2CmdPageDiag::g_enabled &&
+        !VideoCommon::QueryDma::TraceEnabled()) {
+        thread_local std::vector<u32> forwarded;
+        forwarded.resize(words);
+        if (split.ForwardRead(memory_manager.GetID() + 1, source, words, forwarded.data())) {
+            VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::DmaReadsForwarded, 1);
+            for (u32 i = 0; i < words; ++i) {
+                if (method == 0x158) {
+                    fs.parameters.push_back(forwarded[i]);
+                } else if (ram + i < native_data_ram.size()) {
+                    native_data_ram[ram + i] = forwarded[i];
+                }
+            }
+            return;
+        }
+    }
     if (full_drain) {
         split.Drain(VideoCommon::DrainSite::MacroDmaRead);
     } else {

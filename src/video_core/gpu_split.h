@@ -13,6 +13,7 @@
 #include <functional>
 #include <memory>
 #include <thread>
+#include <vector>
 #include <type_traits>
 
 #include "common/common_types.h"
@@ -266,7 +267,14 @@ public:
     /// The method just sent writes only [begin, end): a macro memory read waits for it only where
     /// they overlap. Without this call its write counts for every read. EDEN_NX2_RANGED_WAITS=0
     /// keeps every write counting.
-    void RangeLastWrite(GPUVAddr begin, GPUVAddr end);
+    /// `data` (optional): the words it writes there, in address space `space`, which a macro
+    /// memory read of them takes without waiting (ForwardRead).
+    void RangeLastWrite(GPUVAddr begin, GPUVAddr end, const u32* data = nullptr, size_t space = 0);
+    /// For a macro memory read of `words` words at `begin` in address space `space`: when the
+    /// newest work that may write them is one constant buffer upload still queued for the back,
+    /// copies its words to `out` and returns true; the read then needs no wait.
+    /// EDEN_NX2_FORWARD_READS=0 turns it off.
+    bool ForwardRead(size_t space, GPUVAddr begin, u32 words, u32* out);
     /// For the front's macro memory reads (MME DMA) of [begin, end): waits until the back executed
     /// the methods that write memory in command order (memory_write_mask, NoteMemoryWrite; ranged
     /// writes only where they overlap), the compute and copy work and the work before the last
@@ -366,6 +374,8 @@ private:
         GPUVAddr begin;
         GPUVAddr end;
         u32 method;
+        size_t space;           ///< Address space of `data`; 0 when the words are not known
+        std::vector<u32> data;  ///< The words written over [begin, end), when known
     };
     static constexpr size_t MaxRangedWrites = 256;
     std::deque<RangedWrite> ranged_writes;

@@ -183,6 +183,7 @@ enum class Counter : u32 {
     AcquireLaterWrite, ///< Drained acquires: work sent after its release may write the word
     AcquirePayloadMiss, ///< Drained acquires: the queued release's payload does not meet it
     AcquireMetAfterDrain, ///< Drained acquires met at once after the drain
+    DmaReadsForwarded, ///< MME DMA reads served from a queued constant buffer upload
     Count,
 };
 static_assert(static_cast<size_t>(Counter::Count) <= std::tuple_size_v<decltype(ThreadData::counters)>);
@@ -278,6 +279,11 @@ inline void Report(const char* thread_name = "GPU thread") {
                                 rate(Counter::AcquirePayloadMiss),
                                 rate(Counter::AcquireMetAfterDrain));
         }
+    }
+    if (const u64 forwarded = data.counters[static_cast<size_t>(Counter::DmaReadsForwarded)];
+        forwarded != 0) {
+        line += fmt::format(" | MME DMA reads from queued uploads {:.0f}",
+                            static_cast<double>(forwarded) * 1e9 / window);
     }
     if (const u64 fast = data.counters[static_cast<size_t>(Counter::AcquiresFast)]; fast != 0) {
         line += fmt::format(" | acquires without a drain {:.0f}",
