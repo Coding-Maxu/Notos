@@ -31,7 +31,6 @@ SyncpointManager::ActionHandle SyncpointManager::RegisterAction(
         }
         ++it;
     }
-    pending_waiters.fetch_add(1, std::memory_order_seq_cst);
     return action_storage.emplace(it, expected_value, ++last_action_id, std::move(action))->id;
 }
 
@@ -45,7 +44,6 @@ void SyncpointManager::DeregisterAction(std::list<RegisteredAction>& action_stor
     for (auto it = action_storage.begin(); it != action_storage.end(); it++) {
         if (it->id == handle) {
             action_storage.erase(it);
-            pending_waiters.fetch_sub(1, std::memory_order_relaxed);
             return;
         }
     }
@@ -84,10 +82,7 @@ void SyncpointManager::WaitHost(u32 syncpoint_id, u32 expected_value) {
 
 void SyncpointManager::Increment(std::atomic<u32>& syncpoint, std::condition_variable& wait_cv,
                                  std::list<RegisteredAction>& action_storage) {
-    const auto new_value{syncpoint.fetch_add(1, std::memory_order_seq_cst) + 1};
-    if (pending_waiters.load(std::memory_order_seq_cst) == 0) {
-        return;
-    }
+    auto new_value{syncpoint.fetch_add(1, std::memory_order_acq_rel) + 1};
 
     std::scoped_lock lk(guard);
     auto it = action_storage.begin();
@@ -97,24 +92,19 @@ void SyncpointManager::Increment(std::atomic<u32>& syncpoint, std::condition_var
         }
         it->action();
         it = action_storage.erase(it);
-        pending_waiters.fetch_sub(1, std::memory_order_relaxed);
     }
     wait_cv.notify_all();
 }
 
 void SyncpointManager::Wait(std::atomic<u32>& syncpoint, std::condition_variable& wait_cv,
                             u32 expected_value) {
-    const auto pred = [&]() { return syncpoint.load(std::memory_order_seq_cst) >= expected_value; };
+    const auto pred = [&]() { return syncpoint.load(std::memory_order_acquire) >= expected_value; };
     if (pred()) {
         return;
     }
 
     std::unique_lock lk(guard);
-    pending_waiters.fetch_add(1, std::memory_order_seq_cst);
-    if (!pred()) {
-        wait_cv.wait(lk, pred);
-    }
-    pending_waiters.fetch_sub(1, std::memory_order_relaxed);
+    wait_cv.wait(lk, pred);
 }
 
 } // namespace Host1x

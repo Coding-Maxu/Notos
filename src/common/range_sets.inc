@@ -64,8 +64,7 @@ struct RangeSet<AddressType>::RangeSetImpl {
 
     template <typename Func>
     void ForEachInRange(AddressType base_addr, size_t size, Func&& func) const {
-        // An empty query breaks the set's ordering: at address 0 it visits every range, inverted.
-        if (m_ranges_set.empty() || size == 0) {
+        if (m_ranges_set.empty()) {
             return;
         }
         const AddressType start_address = base_addr;

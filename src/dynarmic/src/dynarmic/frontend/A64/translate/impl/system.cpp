@@ -86,15 +86,7 @@ bool TranslatorVisitor::DSB(Imm<4> /*CRm*/) {
     return true;
 }
 
-bool TranslatorVisitor::DMB(Imm<4> CRm) {
-#if defined(_M_X64) || defined(__x86_64__)
-    const u32 access = CRm.ZeroExtend() & 3U;
-    if (access == 1U || access == 2U) {
-        return true;
-    }
-#else
-    (void)CRm;
-#endif
+bool TranslatorVisitor::DMB(Imm<4> /*CRm*/) {
     ir.DataMemoryBarrier();
     return true;
 }

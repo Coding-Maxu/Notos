@@ -79,7 +79,6 @@ public:
         u32 operation;
         std::chrono::steady_clock::time_point since;
         bool reported;
-        u64 last_checked_release{};
 
         [[nodiscard]] bool Matches(u32 current) const;
     };
