@@ -23,6 +23,7 @@
 #include "video_core/game_dlss_status.h"
 #include "video_core/macro.h"
 #include "video_core/native_qmd.h"
+#include "video_core/split_write_tracker.h"
 #include "video_core/textures/texture.h"
 
 namespace Core {
@@ -279,6 +280,10 @@ private:
     bool FrontPlainWrite(VideoCommon::GpuSplit& split, FrontState& state, u32 method,
                          u32 argument);
     void FrontVerify(VideoCommon::GpuSplit& split, FrontState& state);
+    /// What a method sent from the front may write on the back (GpuSplit::Effect).
+    VideoCommon::SplitWriteTracker::Effect FrontEffect(u32 method) const;
+    /// After sending it: the memory it writes, for the front's reads.
+    void FrontNoteWrites(VideoCommon::GpuSplit& split, FrontState& state, u32 method);
     std::unique_ptr<FrontState> front;
     bool front_macros{}; ///< The front owns the macro code and bindings (the back skips them)
 

@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -18,6 +19,19 @@
 
 #include "common/common_types.h"
 #include "video_core/engines/engine_interface.h"
+#include "video_core/split_write_tracker.h"
+
+namespace Core {
+class System;
+}
+
+namespace Tegra {
+class MemoryManager;
+}
+
+namespace Tegra::Engines {
+class EngineInterface;
+}
 
 namespace VideoCommon {
 
@@ -32,6 +46,7 @@ enum class DrainSite : u32 {
     ListSync,       ///< Command lists on draw-written pages: the work before the last host sync
     ListFlush,      ///< Command lists on GPU-written pages: drain and flush the pages
     MacroDmaRead,   ///< The front's macros read memory (MME DMA)
+    MacroDmaWrites, ///< The same, waiting only for the queued work that may write it
     MacroDmaFlush,  ///< Those words are in the buffer cache
     GpSyncFence,    ///< A GP entry's sync bit (sync_memory_operations)
     Map,            ///< GPU memory maps before later command reads
@@ -43,7 +58,8 @@ enum class DrainSite : u32 {
 
 inline constexpr std::array<const char*, static_cast<size_t>(DrainSite::Count)> drain_site_names{
     "other",       "fetch drain",     "acquire",    "semaphore flush", "fence release",
-    "list writers", "list sync",      "list flush", "macro dma read",  "macro dma flush",
+    "list writers", "list sync",      "list flush", "macro dma read",  "macro dma writes",
+    "macro dma flush",
     "gp sync fence", "map",           "front start", "front verify",  "macro dma check",
 };
 
@@ -134,8 +150,10 @@ public:
 
     /// An engine method write, executed as DmaPusher would (method sink, ConsumeSink, call).
     /// `segment`: the engine's current_dma_segment for the call, when the engine reads it.
+    /// `effect`: what the entry may write (SplitWriteTracker; unknown unless the caller knows).
+    using Effect = SplitWriteTracker::Effect;
     void Method(Tegra::Engines::EngineInterface* engine, u32 method, u32 argument, bool is_last,
-                const GPUVAddr* segment) {
+                const GPUVAddr* segment, Effect effect = Effect::Unknown) {
         SelectEngine(engine);
         const size_t words = segment != nullptr ? 2 : 1;
         u64* const entry = Reserve(words);
@@ -145,20 +163,22 @@ public:
         if (segment != nullptr) {
             entry[1] = *segment;
         }
-        Commit(words);
+        Commit(words, effect);
         if (engine->memory_write_mask[method]) {
             NoteMethodWrite(engine, method);
         }
     }
     void MultiMethod(Tegra::Engines::EngineInterface* engine, u32 method, const u32* words,
-                     u32 amount, u32 methods_pending, const GPUVAddr* segment);
+                     u32 amount, u32 methods_pending, const GPUVAddr* segment,
+                     Effect effect = Effect::Unknown);
     /// A write made by a macro: CallMethod without the method sink, as the engines' macros do.
-    void MacroWrite(Tegra::Engines::EngineInterface* engine, u32 method, u32 argument) {
+    void MacroWrite(Tegra::Engines::EngineInterface* engine, u32 method, u32 argument,
+                    Effect effect = Effect::Unknown) {
         SelectEngine(engine);
         u64* const entry = Reserve(1);
         entry[0] = static_cast<u64>(Kind::Method) | IsLast | Direct | (u64{method & 0xffff} << 8) |
                    (u64{argument} << 32);
-        Commit(1);
+        Commit(1, effect);
         if (engine->memory_write_mask[method]) {
             NoteMethodWrite(engine, method);
         }
@@ -171,7 +191,7 @@ public:
         u64* const entry = Reserve(1);
         entry[0] = static_cast<u64>(Kind::Method) | IsLast | Sink | (u64{method & 0xffff} << 8) |
                    (u64{argument} << 32);
-        Commit(1);
+        Commit(1, Effect::None);
     }
     /// EDEN_NX2_RING_PAIRS: a write that only stores a register's value (no execution_mask side
     /// effect; native compute: native_plain_methods), appended to the open Pairs block. A block
@@ -187,7 +207,7 @@ public:
             ++pairs_count;
             *pairs_header = static_cast<u64>(Kind::Pairs) | (u64{pairs_count} << 32);
             CountBatched(Batched::Pairs);
-            Commit(1);
+            Commit(1, Effect::None);
             return;
         }
         u64* const entry = Reserve(2);
@@ -197,19 +217,19 @@ public:
         pairs_count = 1;
         CountBatched(Batched::Pairs);
         CountBatched(Batched::PairBlocks);
-        Commit(2);
+        Commit(2, Effect::None);
     }
 
     /// Runs `func` on the back after everything sent before it. Must be trivially copyable.
     template <typename Func>
-    void Defer(const Func& func) {
+    void Defer(const Func& func, Effect effect = Effect::Unknown) {
         static_assert(std::is_trivially_copyable_v<Func> && alignof(Func) <= alignof(u64));
         constexpr size_t payload = (sizeof(Func) + sizeof(u64) - 1) / sizeof(u64);
         u64* const entry = Reserve(2 + payload);
         entry[0] = static_cast<u64>(Kind::Call) | (u64{payload} << 8);
         entry[1] = reinterpret_cast<u64>(&CallThunk<Func>);
         std::memcpy(entry + 2, &func, sizeof(Func));
-        Commit(2 + payload);
+        Commit(2 + payload, effect);
     }
     void DeferFunction(std::function<void()>&& func);
     /// Runs `func` on the back and waits for it: for work on back-owned state, such as a buffer
@@ -291,8 +311,33 @@ public:
     /// after that release, so an acquire it meets needs no drain. EDEN_NX2_ACQUIRE_QUEUED=0 off.
     /// `miss` (when no payload): 1 no release recorded, 2 it already ran, 3 a later write.
     std::optional<u32> QueuedReleasePayload(u64 device, GPUVAddr address, u32* miss = nullptr);
+    /// The entry just sent also writes [address, address + size) of `memory`, noted by device
+    /// page (other mappings may alias it, and the caches keep state per page).
+    void NoteWrite(const Tegra::MemoryManager& memory, GPUVAddr address, u64 size);
+    /// The entry just sent writes guest memory the front can't tell.
+    void NoteUnknownWrite() {
+        writes.Entry(Effect::Unknown, write_position);
+    }
+    /// Waits for the queued functions (GPU memory maps among them) before the front translates
+    /// addresses, then drops the pending writes the back has run. Returns the back's position.
+    u64 SettleWrites();
+    /// Ring position the back must pass to execute possible writers of [begin, end).
+    /// Deferred fence writes can still be pending afterwards.
+    [[nodiscard]] u64 ReadTarget(u64 begin, u64 end) const {
+        return writes.ReadTarget(begin, end);
+    }
+    [[nodiscard]] const SplitWriteTracker& Writes() const {
+        return writes;
+    }
+    /// Waits until the back consumed `position` (not what came after). Returns whether it had
+    /// not yet.
+    bool WaitUntil(u64 position, DrainSite site) {
+        return WaitFor((std::min)(position, write_position), site);
+    }
 
 private:
+    friend struct GpuSplitTestAccess;
+
     enum class Kind : u64 {
         Wrap,   ///< The rest of the ring is unused: continue at its start
         Engine, ///< The engine the next methods go to: word 1
@@ -334,8 +379,9 @@ private:
         return ReserveSlow(words);
     }
     u64* ReserveSlow(size_t words);
-    void Commit(size_t words) {
+    void Commit(size_t words, Effect effect) {
         write_position += words;
+        writes.Entry(effect, write_position);
         if (write_position - published_local >= publish_every) {
             Publish();
         }
@@ -349,8 +395,19 @@ private:
     void SwitchEngine(Tegra::Engines::EngineInterface* engine);
     bool WaitFor(u64 target, DrainSite site);
 
+    /// One step of a front wait for the back to consume `target`.
+    void Backoff(u32 spins, u64 target);
+    /// After the back stored `consumed`: wakes a front sleeping in Backoff.
+    void NotifyFront() {
+        if (front_waiting.load(std::memory_order_seq_cst)) {
+            front_wake.fetch_add(1, std::memory_order_seq_cst);
+            front_wake.notify_one();
+        }
+    }
+
     void BackLoop(std::stop_token stop_token);
-    size_t Execute(const u64* entry);
+    /// Runs the entry at `entry` (of the `words` published before the ring's end), returns its size.
+    size_t Execute(const u64* entry, size_t words);
 
     Core::System* system{};
     bool active{};
@@ -388,6 +445,14 @@ private:
     /// Drops consumed ranged writes; returns the position a memory read of [begin, end) waits
     /// for and the method behind it.
     u64 MemoryWriterTarget(u64 done, GPUVAddr begin, GPUVAddr end, u32& target_method);
+    u64 last_function_position{};
+    SplitWriteTracker writes;
+    /// NoteWrite's last translation: memory manager, GPU page, device page, the function
+    /// position it was made at (a later function may remap).
+    const Tegra::MemoryManager* note_memory{};
+    GPUVAddr note_page{~GPUVAddr{0}};
+    u64 note_device{};
+    u64 note_function{};
     u64 published_local{};
     u64 consumed_cache{};
     /// Words between publishes: small right after a drain, while the back has nothing to do.
@@ -419,6 +484,9 @@ private:
     alignas(128) std::atomic<u64> wait_target{~u64{0}};
     alignas(128) std::atomic<bool> back_waiting{};
     std::atomic<u32> wake{};
+    /// The front sleeps in Backoff (#161: instead of yielding).
+    alignas(128) std::atomic<bool> front_waiting{};
+    std::atomic<u32> front_wake{};
     std::jthread back_thread;
 };
 
