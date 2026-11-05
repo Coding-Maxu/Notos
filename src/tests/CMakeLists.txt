@@ -22,7 +22,9 @@ add_executable(tests
     video_core/texture_rect_descriptor.cpp
     audio_core/batch_decoder.cpp
     audio_core/hardware_audio_codec.cpp
+    core/gpu_dirty_memory.cpp
     core/memory_acquire.cpp
+    core/builtin_patches.cpp
     core/system_test_context.h
     video_core/ampere_branch_modifiers.cpp
     video_core/ampere_fast_fusion_logged.cpp
