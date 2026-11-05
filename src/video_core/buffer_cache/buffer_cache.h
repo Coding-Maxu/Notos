@@ -776,9 +776,15 @@ bool BufferCache<P>::BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, 
         }
         ssbo_addr = holder + indirect_offset;
     }
+    // EDEN_NX2_GRAPHICS_SSBO_BARE=0 takes the word after a native graphics pointer as its size
+    // again: much smaller bindings to synchronize per draw, for A/B runs.
+    static const bool bare_pointers = [] {
+        const char* const value = std::getenv("EDEN_NX2_GRAPHICS_SSBO_BARE");
+        return value == nullptr || value[0] != '0';
+    }();
     channel_state->storage_buffers[stage][ssbo_index] =
         StorageBufferBinding(ssbo_addr, cbuf_index, is_written,
-                             maxwell3d->GetNativeMacroEngine().native_turing ||
+                             (bare_pointers && maxwell3d->GetNativeMacroEngine().native_turing) ||
                                  indirect_offset != ~0U,
                              indirect_offset != ~0U);
     if (indirect_offset != ~0U) {
