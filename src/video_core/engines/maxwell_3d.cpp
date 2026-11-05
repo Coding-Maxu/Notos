@@ -1222,7 +1222,6 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
     split.MultiMethod(this, method, base_start, amount, methods_pending, nullptr);
     if (write_end != 0) {
         // Uploaded words, unless the shadow RAM replays other values for them on the back.
-        constexpr u32 cb_data = MAXWELL3D_REG_INDEX(const_buffer.buffer);
         const bool upload = method >= cb_data && method < cb_data + 16 &&
                             fs.control != Regs::ShadowRamControl::Replay;
         split.RangeLastWrite(write_begin, write_end, upload ? base_start : nullptr,
