@@ -3389,7 +3389,8 @@ private:
     void FrontWrite(VideoCommon::GpuSplit& split, FrontState& state, u32 method, u32 argument,
                     bool is_last_call, bool from_macro);
     void FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split, FrontState& state);
-    void FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& state, u32 method, u32 count);
+    void FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& state, u32 macro, u32 method,
+                      u32 count);
     /// The memory `amount` words of `method` write, if known (constant buffer uploads, reports).
     std::pair<GPUVAddr, GPUVAddr> FrontWriteRange(const FrontState& state, u32 method,
                                                   u32 amount) const;
