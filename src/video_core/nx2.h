@@ -28,6 +28,9 @@ inline std::atomic<bool> g_nx2_ampere{false};
 inline constexpr u64 Nx2WrittenPageBits = 12;
 inline std::array<std::atomic<u64>, (u64{1} << (36 - Nx2WrittenPageBits)) / 64> g_nx2_gpu_written_pages{};
 
+/// Bumped when a page is marked GPU-written for the first time (EDEN_NX2_LIST_FAST).
+inline std::atomic<u64> g_nx2_new_written_pages{};
+
 inline void Nx2MarkGpuWritten(u64 device_address, u64 size) {
     if (size == 0) {
         return;
@@ -41,7 +44,9 @@ inline void Nx2MarkGpuWritten(u64 device_address, u64 size) {
         const u64 mask = (bits == 64 ? ~u64{0} : (u64{1} << bits) - 1) << first_bit;
         auto& word = g_nx2_gpu_written_pages[page / 64];
         if ((word.load(std::memory_order_relaxed) & mask) != mask) {
-            word.fetch_or(mask, std::memory_order_relaxed);
+            if ((word.fetch_or(mask, std::memory_order_relaxed) & mask) != mask) {
+                g_nx2_new_written_pages.fetch_add(1, std::memory_order_relaxed);
+            }
         }
         page += bits;
     }

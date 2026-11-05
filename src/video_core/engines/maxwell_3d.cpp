@@ -17,6 +17,7 @@
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/core_timing.h"
+#include "video_core/nx2_debug_control.h"
 #include "video_core/dirty_flags.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/engines/maxwell_3d.h"
@@ -1070,8 +1071,13 @@ struct Maxwell3D::FrontState {
     /// then can it have a deferred instanced draw to issue at the end of a macro.
     bool draw_pending{true};
     bool skip_same{}; ///< SkipSameValueWrites() && FrontSkipSame(), read once
+    /// The inline upload being sent, when its words land linearly (EDEN_NX2_DMA_WAIT_WRITERS).
+    bool upload_known{};
     /// The back's draw manager is in an instance loop (DrawMode::Instance): draw.end does nothing.
     bool instance_loop{};
+    u64 upload_device{};
+    u32 upload_size{};
+    u32 upload_offset{};
 };
 
 namespace {
@@ -1081,6 +1087,13 @@ namespace {
 bool FrontVerifyEnabled() {
     static const bool verify = std::getenv("EDEN_NX2_SPLIT_VERIFY") != nullptr;
     return verify;
+}
+
+// Methods whose execution on the back writes guest memory (inline uploads, reports).
+bool WritesGuestMemory(u32 method) {
+    return method == MAXWELL3D_REG_INDEX(launch_dma) ||
+           method == MAXWELL3D_REG_INDEX(inline_data) ||
+           method == MAXWELL3D_REG_INDEX(report_semaphore.query);
 }
 
 // Executable methods ProcessMethodCall handles itself; the rest go to the draw manager.
@@ -1306,6 +1319,9 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
             FrontNoteRelease(split, fs, value);
         }
     }
+    if (WritesGuestMemory(method)) {
+        FrontNoteMemoryWrite(split, fs, method, &value, 1);
+    }
 }
 
 void Maxwell3D::FrontNoteRelease(VideoCommon::GpuSplit& split, const FrontState& fs,
@@ -1484,6 +1500,9 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
         split.NoteWrite(memory_manager, *cb_write, u64{amount} * sizeof(u32));
     } else if (method == MAXWELL3D_REG_INDEX(report_semaphore.query) && amount != 0) {
         split.NoteWrite(memory_manager, ReportAddress(fs.regs), ReportBytes);
+    }
+    if (WritesGuestMemory(method) && amount != 0) {
+        FrontNoteMemoryWrite(split, fs, method, base_start, amount);
     }
 }
 
@@ -1682,6 +1701,80 @@ bool Maxwell3D::FrontSkipsLoopWrite(FrontState& fs, u32 method, u32 value, bool 
     // draws nothing in an instance loop, and it only reads the vertex buffer first and count
     // (index_buffer writes also mark the index buffer dirty, so they are always sent).
     return method != MAXWELL3D_REG_INDEX(draw.end) || fs.instance_loop;
+}
+
+void Maxwell3D::FrontNoteMemoryWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 method,
+                                     const u32* words, u32 count) {
+    split.NoteMemoryWriter();
+    const auto unknown = [&split](const char* what) { split.NoteMemoryWrite(0, ~u64{0}, what); };
+    if (method == MAXWELL3D_REG_INDEX(report_semaphore.query)) {
+        constexpr u32 base = MAXWELL3D_REG_INDEX(report_semaphore);
+        const GPUVAddr address = (GPUVAddr{fs.regs[base]} << 32) | fs.regs[base + 1];
+        Regs::ReportSemaphore query_regs{};
+        query_regs.query.raw = words[count - 1];
+        const auto device = memory_manager.GpuToCpuAddress(address);
+        if (!device) {
+            return; // CounterReport writes nothing at an unmapped address.
+        }
+        // A short payload release is a fence: written when the back runs it (fast fences).
+        if (query_regs.query.operation == Regs::ReportSemaphore::Operation::Release &&
+            query_regs.query.short_query != 0 &&
+            query_regs.query.report == Regs::ReportSemaphore::Report::Payload) {
+            const u32 payload = fs.regs[base + 2];
+            split.NoteMemoryWriteData(*device, &payload, 1);
+        } else {
+            split.NoteMemoryWrite(*device, 16, "3D report");
+        }
+        return;
+    }
+    constexpr u32 base = MAXWELL3D_REG_INDEX(upload);
+    if (method == MAXWELL3D_REG_INDEX(launch_dma)) {
+        const u64 line_length = fs.regs[base];
+        const u64 lines = (std::max)(fs.regs[base + 1], 1U);
+        const u64 pitch = (std::max<u64>)(fs.regs[base + 4], line_length);
+        const GPUVAddr address = (GPUVAddr{fs.regs[base + 2]} << 32) | fs.regs[base + 3];
+        const u64 size = pitch * (lines - 1) + line_length;
+        const auto device = memory_manager.GpuToCpuAddress(address);
+        // LAUNCH_DMA: bit 0 pitch (linear) layout, bits 5:4 completion (2 releases a semaphore).
+        const u32 launch = words[count - 1];
+        const bool linear = (launch & 1) != 0;
+        if (((launch >> 4) & 3) == 2) {
+            unknown("upload release");
+        }
+        fs.upload_known = device && linear && lines == 1 && (*device & 3) == 0 &&
+                          memory_manager.GpuToCpuAddress(address + size - 1) ==
+                              *device + size - 1;
+        fs.upload_device = device.value_or(0);
+        fs.upload_size = static_cast<u32>((std::min<u64>)(size, ~0U));
+        fs.upload_offset = 0;
+        if (!fs.upload_known) {
+            if (!device || size == 0 || size > (u64{64} << 20)) {
+                return unknown("upload unmapped or huge");
+            }
+            split.NoteMemoryWrite(*device, size, "upload (not linear)");
+        }
+        return;
+    }
+    // inline_data words of the current upload.
+    if (!fs.upload_known) {
+        const auto device = memory_manager.GpuToCpuAddress(
+            (GPUVAddr{fs.regs[base + 2]} << 32) | fs.regs[base + 3]);
+        if (!device) {
+            return unknown("upload data unmapped");
+        }
+        split.NoteMemoryWrite(*device, fs.regs[base] * u64{(std::max)(fs.regs[base + 1], 1U)} +
+                                           u64{fs.regs[base + 4]} * fs.regs[base + 1],
+                              "upload data");
+        return;
+    }
+    const u32 remaining_bytes =
+        fs.upload_offset < fs.upload_size ? fs.upload_size - fs.upload_offset : 0;
+    const u32 whole = (std::min<u32>)(count, remaining_bytes / 4);
+    split.NoteMemoryWriteData(fs.upload_device + fs.upload_offset, words, whole);
+    if (whole < count && remaining_bytes % 4 != 0) {
+        split.NoteMemoryWrite(fs.upload_device + fs.upload_offset + whole * 4, remaining_bytes % 4);
+    }
+    fs.upload_offset += (std::min<u32>)(count * 4, remaining_bytes);
 }
 
 void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 macro,
