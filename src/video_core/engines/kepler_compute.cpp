@@ -1176,10 +1176,11 @@ void KeplerCompute::FrontApply(FrontState& fs, u32 method, u32 argument) {
     fs.registers[method] = argument;
     switch (method) {
     case 0x107:
-        // EDEN_NX2_COMPUTE_SINK keeps the copy exact: an inline QMD whose destination is mapped
-        // launches through ProcessNativeMethod(0xb0, 3) on the back, which leaves 3 in 0xb0
-        // (0xad is restored). Without this the copy kept the last 0xb0 the front sent.
-        if (VideoCommon::GpuSplit::ComputeSink()) {
+        // Keeps the copy exact (front macros read it; EDEN_NX2_COMPUTE_SINK relies on it): an
+        // inline QMD whose destination is mapped launches through ProcessNativeMethod(0xb0, 3) on
+        // the back, which leaves 3 in 0xb0 (0xad is restored). Without this the copy kept the
+        // last 0xb0 the front sent.
+        {
             const GPUVAddr address =
                 ((GPUVAddr{fs.registers[0xc6]} << 32) | fs.registers[0xc7]) << 8;
             const u32 control = fs.registers[0xa7];
