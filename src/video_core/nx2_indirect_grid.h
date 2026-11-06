@@ -20,7 +20,7 @@
 // threads idle (~2.3 ms a frame). Instead the front passes placeholder words that name the entry
 // (a slot), the macros copy them on unchanged (into the QMD's grid and a constant buffer), and the
 // back dispatches indirectly from the entry and copies the entry's words into the constant buffer
-// on the GPU. EDEN_NX2_INDIRECT_GRID=0 reads the words as before.
+// on the GPU. Off by default (see Enabled).
 namespace Tegra::Nx2IndirectGrid {
 
 inline constexpr u32 Slots = 4096;
@@ -49,10 +49,13 @@ inline State& Get() {
     return state;
 }
 
+/// Off by default: Ocarina of Time's lighting flickered white in Kokiri Forest (the stream by
+/// Link's house: 144 flash watch reports a minute with it, 1 without, 2026-11-06). Something still
+/// races between the entry's write and its two readers. EDEN_NX2_INDIRECT_GRID=1 turns it on.
 inline bool Enabled() {
     static const bool enabled = [] {
         const char* const value = std::getenv("EDEN_NX2_INDIRECT_GRID");
-        return value == nullptr || value[0] != '0';
+        return value != nullptr && value[0] == '1';
     }();
     return enabled;
 }
