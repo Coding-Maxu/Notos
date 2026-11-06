@@ -2200,7 +2200,10 @@ void RasterizerVulkan::FrameDumpPass(const Framebuffer* framebuffer) {
     }
 }
 
+void NoteDrawReuseProbeFrame(); // vk_graphics_pipeline.cpp
+
 void RasterizerVulkan::TickFrame() {
+    NoteDrawReuseProbeFrame();
     if (VideoCore::Nx2Debug::HasRequests()) {
         if (auto capture = VideoCore::Nx2Debug::TakeCapture()) {
             // This build keeps the EDEN_NX2_FRAME_DUMP capture (file or time trigger) only.
