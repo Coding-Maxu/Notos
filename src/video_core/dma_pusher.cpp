@@ -677,7 +677,7 @@ void DmaPusher::CallMethod(u32 argument) {
             if (writer) {
                 split.NoteWriter();
             } else if (memory_writer) {
-                split.NoteMemoryWriter();
+                split.NoteUnrangedWriter();
             }
         };
         if (split.Active()) {
@@ -746,7 +746,7 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
             if (writer) {
                 split.NoteWriter();
             } else if (memory_writer) {
-                split.NoteMemoryWriter();
+                split.NoteUnrangedWriter();
             }
         };
         if (split.Active()) {

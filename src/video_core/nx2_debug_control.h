@@ -55,6 +55,11 @@ inline std::atomic<int> g_list_fast{-1};
 /// buffer firsts and counts) (maxwell_3d.cpp).
 inline std::atomic<int> g_loop_skip{-1};
 
+/// EDEN_NX2_DMA_SNAPSHOT (from EvilOOT's dma-snapshot fix): macro DMA reads of pages a drained
+/// read flushed whole skip the drain while nothing sent since may write them (Maxwell3D::
+/// FrontDmaRead). 9 = on, 10 = on and verify every skipped read against the drained path.
+inline std::atomic<int> g_dma_snapshot{-1};
+
 /// The live switch called `name`, or null.
 [[nodiscard]] inline std::atomic<int>* FindSwitch(std::string_view name) {
     if (name == "EDEN_NX2_DMA_WAIT_WRITERS") {
@@ -65,6 +70,9 @@ inline std::atomic<int> g_loop_skip{-1};
     }
     if (name == "EDEN_NX2_LIST_FAST") {
         return &g_list_fast;
+    }
+    if (name == "EDEN_NX2_DMA_SNAPSHOT") {
+        return &g_dma_snapshot;
     }
     if (name == "EDEN_NX2_LOOP_SKIP") {
         return &g_loop_skip;
