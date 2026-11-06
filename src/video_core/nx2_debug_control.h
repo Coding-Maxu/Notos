@@ -41,8 +41,9 @@ namespace VideoCore::Nx2Debug {
     return current;
 }
 inline std::atomic<int> g_dma_wait_writers{-1};
-/// EDEN_NX2_SEM_FAST (default 2 here: Ocarina of Time +1.4 fps at Lake Hylia, 4 live A/B rounds;
-/// =0 turns it off): =1, semaphore acquires without draining the back
+/// EXPERIMENT, off by default: Ocarina of Time flickers white on the bottom half of Link's house
+/// ladder with it (confirmed toggling it live, 2026-11-06), for +1.4 fps. EDEN_NX2_SEM_FAST=1,
+/// semaphore acquires without draining the back
 /// when the value is already met and no queued write overlaps it (puller.cpp).
 inline std::atomic<int> g_sem_fast{-1};
 /// EXPERIMENT (not for nx2): EDEN_NX2_LIST_FAST=1, command list entries skip the wait for queued
