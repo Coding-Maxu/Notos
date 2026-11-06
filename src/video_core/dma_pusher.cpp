@@ -811,7 +811,7 @@ void DmaPusher::RefreshDeferredEntries(CommandList& list) {
 }
 
 bool DmaPusher::SkipWriterWait(u64 size) {
-    const int mode = VideoCore::Nx2Debug::g_list_fast.load(std::memory_order_relaxed);
+    const int mode = VideoCore::Nx2Debug::SwitchValue(VideoCore::Nx2Debug::g_list_fast, "EDEN_NX2_LIST_FAST");
     if (mode == 0) {
         return false;
     }

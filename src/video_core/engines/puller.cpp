@@ -771,7 +771,7 @@ void Puller::ProcessSemaphoreExecute(DmaPusher& dma_pusher, u32 argument) {
         return;
     }
     // Acquires: check once after flushing pending fences; never block the GPU thread on them.
-    if (VideoCore::Nx2Debug::g_sem_fast.load(std::memory_order_relaxed) != 0 &&
+    if (VideoCore::Nx2Debug::SwitchValue(VideoCore::Nx2Debug::g_sem_fast, "EDEN_NX2_SEM_FAST", 2) != 0 &&
         VideoCommon::GpuSplit::Get().Active()) {
         // Only the warning below reads the result: release the fences in order instead.
         OnBack([rasterizer = dma_pusher.rasterizer] { rasterizer->ReleaseFences(); });
@@ -819,7 +819,7 @@ static void NoteSemaphoreWrite(DmaPusher& dma_pusher, GPUVAddr address,
 // =2 also overlays the queued fence releases the front knows, instead of waiting for them.
 static bool SemaphoreReadableNow(DmaPusher& dma_pusher, GPUVAddr address, u32& word) {
     auto& split = VideoCommon::GpuSplit::Get();
-    const int mode = VideoCore::Nx2Debug::g_sem_fast.load(std::memory_order_relaxed);
+    const int mode = VideoCore::Nx2Debug::SwitchValue(VideoCore::Nx2Debug::g_sem_fast, "EDEN_NX2_SEM_FAST", 2);
     using VideoCommon::Nx2Profile::Counter;
     if (!split.Active() || mode == 0) {
         VideoCommon::Nx2Profile::Add(Counter::SemNoFastPath, 1);

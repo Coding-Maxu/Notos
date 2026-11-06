@@ -27,18 +27,32 @@ namespace VideoCore::Nx2Debug {
     const char* value = std::getenv(name);
     return value == nullptr ? 0 : value[0] - '0';
 }
-inline std::atomic<int> g_dma_wait_writers{EnvSwitch("EDEN_NX2_DMA_WAIT_WRITERS")};
-/// EXPERIMENT (not for nx2): EDEN_NX2_SEM_FAST=1, semaphore acquires without draining the back
+/// The switch's value, read from the environment on first use (-1: not read yet). Static
+/// initialization ran before the frontend applied nx2_switches.txt, so those settings were lost.
+[[nodiscard]] inline int SwitchValue(std::atomic<int>& value, const char* name,
+                                    int fallback = 0) {
+    int current = value.load(std::memory_order_relaxed);
+    if (current < 0) [[unlikely]] {
+        int unset = -1;
+        const int initial = std::getenv(name) != nullptr ? EnvSwitch(name) : fallback;
+        value.compare_exchange_strong(unset, initial, std::memory_order_relaxed);
+        current = value.load(std::memory_order_relaxed);
+    }
+    return current;
+}
+inline std::atomic<int> g_dma_wait_writers{-1};
+/// EDEN_NX2_SEM_FAST (default 2 here: Ocarina of Time +1.4 fps at Lake Hylia, 4 live A/B rounds;
+/// =0 turns it off): =1, semaphore acquires without draining the back
 /// when the value is already met and no queued write overlaps it (puller.cpp).
-inline std::atomic<int> g_sem_fast{EnvSwitch("EDEN_NX2_SEM_FAST")};
+inline std::atomic<int> g_sem_fast{-1};
 /// EXPERIMENT (not for nx2): EDEN_NX2_LIST_FAST=1, command list entries skip the wait for queued
 /// compute and copies while no page was newly GPU-written for 2 s; =2 also checks each skipped
 /// entry on the back and logs misses (dma_pusher.cpp).
-inline std::atomic<int> g_list_fast{EnvSwitch("EDEN_NX2_LIST_FAST")};
+inline std::atomic<int> g_list_fast{-1};
 /// EXPERIMENT (not for nx2): EDEN_NX2_LOOP_SKIP=1, the split's front does not send the instance
 /// loop writes the back would ignore (draw.end in an instance loop, unchanged vertex and index
 /// buffer firsts and counts) (maxwell_3d.cpp).
-inline std::atomic<int> g_loop_skip{EnvSwitch("EDEN_NX2_LOOP_SKIP")};
+inline std::atomic<int> g_loop_skip{-1};
 
 /// The live switch called `name`, or null.
 [[nodiscard]] inline std::atomic<int>* FindSwitch(std::string_view name) {
