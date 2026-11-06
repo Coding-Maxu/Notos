@@ -1495,6 +1495,23 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
     const auto positions = GetNativeMacroPositions();
     const u32 start = positions[((method - MacroRegistersStart) >> 1) % positions.size()];
     VideoCommon::Nx2Profile::CountMethod(method, false);
+    // EDEN_NX2_MACRO_TRACE=<method>: the first calls of that macro, parameters and writes.
+    static const u32 traced = [] {
+        const char* value = std::getenv("EDEN_NX2_MACRO_TRACE");
+        return value != nullptr ? static_cast<u32>(std::strtoul(value, nullptr, 16)) : 0U;
+    }();
+    static u32 traced_calls{};
+    const bool trace = traced != 0 && method == traced &&
+                       std::ranges::any_of(fs.parameters, [](u32 p) { return p != 0; }) &&
+                       traced_calls++ < 8;
+    std::string trace_text;
+    if (trace) [[unlikely]] {
+        trace_text = fmt::format("3D macro {:#x} start {:#x} params", traced, start);
+        for (const u32 p : fs.parameters) {
+            trace_text += fmt::format(" {:x}", p);
+        }
+        trace_text += " writes";
+    }
     {
         VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Macro};
         engine.native_interpreter.active_dram = &native_data_ram;
@@ -1503,6 +1520,9 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
             return address < Regs::NUM_REGS ? fs.regs[address] : 0U;
         };
         const auto emit = [&](u32 address, u32 value) {
+            if (trace) [[unlikely]] {
+                trace_text += fmt::format(" {:x}={:x}", address, value);
+            }
             if (address >= MacroRegistersStart) {
                 return false;
             }
@@ -1530,6 +1550,9 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
                       start, result.consumed, parameter_count, result.error);
         }
     }
+    if (trace) [[unlikely]] {
+        LOG_INFO(HW_GPU, "{}", trace_text);
+    }
     fs.parameters.clear();
     if (fs.draw_pending) {
         fs.draw_pending = false;
@@ -1539,6 +1562,87 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
     if (FrontVerifyEnabled() && (++fs.calls & 4095) == 0) [[unlikely]] {
         FrontVerify(split, fs);
     }
+}
+
+bool Maxwell3D::FrontMacroCountsDraw(Core::System& system, VideoCommon::GpuSplit& split,
+                                     u32 method, u32 count) {
+#ifdef ARCHITECTURE_x86_64
+    FrontState& fs = Front(system, split);
+    if (count != 2 || fs.executing_macro != 0 || !fs.parameters.empty()) {
+        return false;
+    }
+    auto& engine = GetNativeMacroEngine();
+    if (engine.native_execution_failed) {
+        return false;
+    }
+    const auto positions = GetNativeMacroPositions();
+    const u32 start = positions[((method - MacroRegistersStart) >> 1) % positions.size()];
+    // Cached per macro start and code generation: the dry runs only repeat when the code changes.
+    struct Verdict {
+        u32 start;
+        u64 generation;
+        bool counts;
+    };
+    static std::array<Verdict, 8> verdicts{};
+    for (const Verdict& verdict : verdicts) {
+        if (verdict.start == start && verdict.generation == engine.native_code_generation + 1) {
+            return verdict.counts;
+        }
+    }
+    if (!engine.native_jit) {
+        engine.native_jit = std::make_shared<TuringMacroJit>();
+    }
+    engine.native_jit->Prepare(engine.native_code, engine.native_code_generation);
+    const auto run = [&](u32 first, u32 second, std::vector<std::pair<u32, u32>>& writes,
+                         std::array<u32, 0xc00>& dram) {
+        dram = native_data_ram;
+        std::vector<u32> parameters{first, second};
+        bool reads_memory = false;
+        const auto read = [&fs](u32 address) {
+            return address < Regs::NUM_REGS ? fs.regs[address] : 0U;
+        };
+        const auto emit = [&](u32 address, u32 value) {
+            if (address >= MacroRegistersStart) {
+                return false;
+            }
+            reads_memory |= address == 0x157 || address == 0x158;
+            writes.emplace_back(address, value);
+            return true;
+        };
+        const auto result =
+            engine.native_jit->Execute(start, parameters, std::span<u32>{dram}, read, emit);
+        return result.success && !reads_memory && parameters.size() == 2;
+    };
+    constexpr u32 vertex_count = MAXWELL3D_REG_INDEX(vertex_buffer.count);
+    constexpr u32 first_vertex = MAXWELL3D_REG_INDEX(vertex_buffer.first);
+    std::vector<std::pair<u32, u32>> a, b;
+    std::array<u32, 0xc00> dram_a{}, dram_b{};
+    bool counts = run(0x13572468u, 0x0BADF00Du, a, dram_a) && run(0x2468ACE0u, 0x1337C0DEu, b, dram_b) &&
+                  a.size() == b.size() && dram_a == dram_b;
+    bool copied = false;
+    for (size_t i = 0; counts && i < a.size(); ++i) {
+        if (a[i].first != b[i].first) {
+            counts = false;
+        } else if (a[i].second != b[i].second) {
+            // The first parameter, unchanged, into the vertex count; the second into the first
+            // vertex (0 in the GPU's words: the back draws from vertex 0 and checks in debug).
+            const bool count_write = a[i].first == vertex_count && a[i].second == 0x13572468u &&
+                                     b[i].second == 0x2468ACE0u;
+            const bool first_write = a[i].first == first_vertex && a[i].second == 0x0BADF00Du &&
+                                     b[i].second == 0x1337C0DEu;
+            counts = count_write || first_write;
+            copied |= count_write;
+        }
+    }
+    counts = counts && copied;
+    static u32 next_verdict{};
+    verdicts[next_verdict++ % verdicts.size()] = {start, engine.native_code_generation + 1, counts};
+    LOG_INFO(HW_GPU, "GPU-counted draws: 3D macro {:#x} (start {:#x}) {}", method, start,
+             counts ? "copies its count into the draw" : "uses its parameters otherwise: read as before");
+    return counts;
+#else
+    return false;
+#endif
 }
 
 void Maxwell3D::FrontTrackInstanceLoop(FrontState& fs, u32 method, u32 value) {

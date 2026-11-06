@@ -6,11 +6,19 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cstring>
+#include <span>
+#include <string>
+#include <unordered_map>
 #include <cstdlib>
 #include <cstdio>
 #include <string_view>
 #include <vector>
 
+#include <fmt/format.h>
+
+#include "common/logging.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "core/core.h"
@@ -27,6 +35,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_cmdpage_diag.h"
+#include "video_core/nx2_indirect_grid.h"
 #include "video_core/rasterizer_interface.h"
 
 namespace Tegra {
@@ -60,6 +69,79 @@ bool WritesMemory(Engines::EngineInterface* engine, Engines::EngineTypes type, u
     }
     return false;
 }
+
+// EDEN_NX2_LIST_CHANGE_TRACE=1: per GPU-written command list address, how often its words differ
+// from the last read of the same address (a wait that only guards unchanged words could go).
+// Logged every 2 s with the first words of each list.
+class ListChangeTrace {
+public:
+    static ListChangeTrace* Get() {
+        static const bool enabled = std::getenv("EDEN_NX2_LIST_CHANGE_TRACE") != nullptr;
+        static ListChangeTrace trace;
+        return enabled ? &trace : nullptr;
+    }
+
+    void Note(GPUVAddr address, std::span<const CommandHeader> words, u32 method, u32 subchannel,
+              u32 method_count, u32 engine) {
+        Entry& entry = entries[address];
+        ++entry.reads;
+        entry.method = method;
+        entry.subchannel = subchannel;
+        entry.method_count = method_count;
+        entry.engine = engine;
+        std::vector<u32> now(words.size());
+        std::memcpy(now.data(), words.data(), words.size() * sizeof(u32));
+        if (!entry.last.empty()) {
+            if (entry.last != now) {
+                ++entry.changed;
+                u32 differing = 0;
+                for (size_t i = 0; i < (std::min)(now.size(), entry.last.size()); ++i) {
+                    differing += now[i] != entry.last[i] ? 1 : 0;
+                }
+                entry.differing_words += differing + static_cast<u32>(
+                    now.size() > entry.last.size() ? now.size() - entry.last.size()
+                                                   : entry.last.size() - now.size());
+            }
+        }
+        entry.last = std::move(now);
+        const auto clock = std::chrono::steady_clock::now();
+        if (clock - last_log < std::chrono::seconds{2}) {
+            return;
+        }
+        last_log = clock;
+        for (auto& [key, value] : entries) {
+            if (value.reads == 0) {
+                continue;
+            }
+            std::string head;
+            for (size_t i = 0; i < (std::min<size_t>)(value.last.size(), 24); ++i) {
+                head += fmt::format(" {:08x}", value.last[i]);
+            }
+            LOG_INFO(HW_GPU,
+                     "List {:#x}: {} words, {} reads, {} changed ({} words differ in all); pending "
+                     "method {:#x} x{} on sub {} (engine {:#x});{}",
+                     key, value.last.size(), value.reads, value.changed, value.differing_words,
+                     value.method, value.method_count, value.subchannel, value.engine, head);
+            value.reads = 0;
+            value.changed = 0;
+            value.differing_words = 0;
+        }
+    }
+
+private:
+    struct Entry {
+        u64 reads{};
+        u64 changed{};
+        u64 differing_words{};
+        u32 method{};
+        u32 subchannel{};
+        u32 method_count{};
+        u32 engine{};
+        std::vector<u32> last;
+    };
+    std::unordered_map<GPUVAddr, Entry> entries;
+    std::chrono::steady_clock::time_point last_log = std::chrono::steady_clock::now();
+};
 } // Anonymous namespace
 
 DmaPusher::DmaPusher(Core::System& system_, MemoryManager& memory_manager_, Control::ChannelState& channel_state_)
@@ -289,8 +371,52 @@ bool DmaPusher::Step() {
             Nx2CmdPageDiag::CountEntry(Nx2CmdPageDiag::Path::Safe);
             command_resume_offset +=
                 ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
+        } else if (gpu_written && command_resume_offset == 0 && header.size == 3 &&
+                   dma_state.method_count == 3 && dma_state.method >= MacroRegistersStart &&
+                   subchannel_type[dma_state.subchannel] == Engines::EngineTypes::KeplerCompute &&
+                   VideoCommon::GpuSplit::Get().Active() && Nx2IndirectGrid::Enabled()) {
+            // A compute macro's (x, y, z) written by GPU work: placeholders the back resolves
+            // on the GPU instead of waiting for it here (nx2_indirect_grid.h).
+            const u32 slot = Nx2IndirectGrid::Reserve(dma_state.dma_get);
+            if (static std::atomic<u32> logged{}; logged.fetch_add(1) < 24) {
+                LOG_INFO(HW_GPU, "GPU-sized dispatch: macro {:#x} on ch {} from {:#x} (slot {})",
+                         dma_state.method, channel_state.bind_id, dma_state.dma_get, slot);
+            }
+            command_headers.resize_destructive(3);
+            for (u32 k = 0; k < 3; ++k) {
+                command_headers[k].argument = Nx2IndirectGrid::Placeholder(slot, k);
+            }
+            const std::span<const CommandHeader> commands{command_headers.data(), header.size};
+            RecordParsedEntry(header, commands);
+            Nx2CmdPageDiag::CountEntry(Nx2CmdPageDiag::Path::Copy);
+            command_resume_offset += ProcessCommands(commands, 0);
+        } else if (gpu_written && command_resume_offset == 0 && header.size == 2 &&
+                   dma_state.method_count == 2 && dma_state.method >= MacroRegistersStart &&
+                   subchannel_type[dma_state.subchannel] == Engines::EngineTypes::Maxwell3D &&
+                   VideoCommon::GpuSplit::Get().Active() && Nx2IndirectGrid::DrawsEnabled() &&
+                   static_cast<Engines::Maxwell3D*>(subchannels[dma_state.subchannel])
+                       ->FrontMacroCountsDraw(system, VideoCommon::GpuSplit::Get(),
+                                              dma_state.method, 2)) {
+            // A 3D macro's (count, unused) written by GPU work, which the macro copies into the
+            // draw's vertex count: the back draws with the GPU's count (nx2_indirect_grid.h).
+            const u32 slot = Nx2IndirectGrid::Reserve(dma_state.dma_get);
+            command_headers.resize_destructive(2);
+            for (u32 k = 0; k < 2; ++k) {
+                command_headers[k].argument = Nx2IndirectGrid::DrawPlaceholder(slot, k);
+            }
+            const std::span<const CommandHeader> commands{command_headers.data(), header.size};
+            RecordParsedEntry(header, commands);
+            Nx2CmdPageDiag::CountEntry(Nx2CmdPageDiag::Path::Copy);
+            command_resume_offset += ProcessCommands(commands, 0);
         } else if (ReadGpuWrittenCommands(dma_state.dma_get, static_cast<u32>(header.size))) {
             const std::span<const CommandHeader> commands{command_headers.data(), header.size};
+            if (ListChangeTrace* const trace = ListChangeTrace::Get()) [[unlikely]] {
+                const u32 sub = dma_state.subchannel;
+                trace->Note(dma_state.dma_get, commands, dma_state.method, sub,
+                            dma_state.method_count,
+                            sub < subchannel_type.size() ? static_cast<u32>(subchannel_type[sub])
+                                                         : ~0U);
+            }
             RecordParsedEntry(header, commands);
             Nx2CmdPageDiag::CountEntry(Nx2CmdPageDiag::Path::Copy);
             command_resume_offset +=

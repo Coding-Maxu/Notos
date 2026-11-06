@@ -2186,7 +2186,7 @@ void BufferCache<P>::Nx2NoteListWrite(BufferId buffer_id, DAddr device_addr, u64
 }
 
 template <class P>
-bool BufferCache<P>::Nx2CopyListPages(u64 tick) {
+bool BufferCache<P>::Nx2CopyListPages(u64 tick, u64 writer) {
     if constexpr (IS_OPENGL) {
         return false;
     } else {
@@ -2226,6 +2226,7 @@ bool BufferCache<P>::Nx2CopyListPages(u64 tick) {
             entry.copy = staging;
             entry.copy_writes = entry.writes;
             entry.copy_tick = tick;
+            entry.copy_writer = writer;
             entry.copy_begin = static_cast<u32>(begin - page);
             entry.copy_end = static_cast<u32>(end - page);
         }
@@ -2259,6 +2260,7 @@ auto BufferCache<P>::Nx2ReadListCopy(DAddr device_addr, std::span<u8> out, bool 
         };
         u64 tick{};
         u64 writes{};
+        u64 writer{};
         {
             std::scoped_lock lock{nx2_list_mutex};
             const auto it = nx2_list_pages.find(page);
@@ -2292,9 +2294,10 @@ auto BufferCache<P>::Nx2ReadListCopy(DAddr device_addr, std::span<u8> out, bool 
             }
             tick = entry.copy_tick;
             writes = entry.copy_writes;
+            writer = entry.copy_writer;
         }
         // Submitted with the work that wrote the page (Nx2CopyListPages's caller flushes).
-        runtime.WaitSubmittedTick(tick);
+        runtime.WaitSubmittedTick(tick, writer);
         std::scoped_lock lock{nx2_list_mutex};
         const auto it = nx2_list_pages.find(page);
         if (it == nx2_list_pages.end() || !current(it->second) || it->second.copy_tick != tick ||

@@ -314,7 +314,7 @@ void GpuSplit::RangeLastWrite(GPUVAddr begin, GPUVAddr end, const u32* data, siz
             return;
         }
     }
-    if (ranged_writes.size() == MaxRangedWrites) {
+    if (ranged_writes.size() >= MaxRangedWrites()) {
         // Too many in flight: the oldest counts for every read again.
         const RangedWrite& oldest = ranged_writes.front();
         if (oldest.position > last_memory_write_position) {
@@ -361,13 +361,28 @@ u64 GpuSplit::MemoryWriterTarget(u64 done, GPUVAddr begin, GPUVAddr end, u32& ta
     }
     u64 target = std::max({last_writer_position, last_sync_position, last_memory_write_position});
     target_method = last_memory_write_method;
-    for (const RangedWrite& write : ranged_writes) {
-        if (write.begin < end && begin < write.end && write.position > target) {
-            target = write.position;
-            target_method = write.method;
+    // Newest first (positions rise along the deque): the first overlap is the target, and the
+    // writes before `target` can't raise it.
+    for (auto it = ranged_writes.rbegin(); it != ranged_writes.rend() && it->position > target;
+         ++it) {
+        if (it->begin < end && begin < it->end) {
+            target = it->position;
+            target_method = it->method;
+            break;
         }
     }
     return std::min(target, write_position);
+}
+
+size_t GpuSplit::MaxRangedWrites() {
+    // 256 overflowed in Ocarina of Time (thousands of constant buffer uploads a frame): the
+    // oldest then counted for every semaphore acquire and macro memory read, which waited for
+    // the back to reach it.
+    static const size_t max = [] {
+        const char* const value = std::getenv("EDEN_NX2_RANGED_MAX");
+        return value != nullptr ? (std::max<size_t>)(std::strtoull(value, nullptr, 10), 1) : 256;
+    }();
+    return max;
 }
 
 bool GpuSplit::HasQueuedMemoryWriters(GPUVAddr begin, GPUVAddr end) {

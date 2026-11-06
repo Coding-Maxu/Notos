@@ -158,6 +158,8 @@ public:
     Tegra::Engines::AccelerateDMAInterface& AccessAccelerateDMA() override;
     void AccelerateInlineToMemory(GPUVAddr address, size_t copy_size,
                                   std::span<const u8> memory) override;
+    void AccelerateInlineToMemoryImpl(GPUVAddr address, size_t copy_size,
+                                      std::span<const u8> memory);
     void LoadDiskResources(u64 title_id, std::stop_token stop_loading,
                            const VideoCore::DiskResourceLoadCallback& callback) override;
 
@@ -191,6 +193,9 @@ private:
     void CaptureIndirectTrace();
     void CollectIndirectTrace();
     void TraceDrawFailure(std::string_view reason);
+    bool IsNx2IndirectReset(bool is_indexed, u32 instance_count);
+    /// A compute dispatch was recorded since the last barrier for GPU-counted draws.
+    bool compute_since_count_barrier{};
     bool TryNx2IndirectReset(bool is_indexed, u32 instance_count);
 
     void FlushWork();
@@ -199,7 +204,7 @@ private:
 
     /// Records the copies of the command list pages the work just recorded wrote and submits, so
     /// the GPU makes them now (BufferCache::Nx2CopyListPages).
-    void SubmitNx2ListCopies();
+    void SubmitNx2ListCopies(u64 writer);
 
     void UpdateDynamicStates(GraphicsPipeline* draw_pipeline = nullptr);
 

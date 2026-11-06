@@ -369,7 +369,8 @@ public:
         }
     }
     /// True when it recorded copies, which the GPU completes at `tick` (the caller submits).
-    bool Nx2CopyListPages(u64 tick);
+    /// `writer`: the dispatch's shader hash, 0 for a DMA copy (EDEN_NX2_LIST_WAIT_TRACE).
+    bool Nx2CopyListPages(u64 tick, u64 writer = 0);
     enum class Nx2ListRead { Unknown, Copied, Synced, NeedsSync };
     /// Front thread: Synced when guest memory holds the page `device_addr` lies in (flushed and
     /// written by no GPU work since), else Copied with `out` filled from the copy of its last
@@ -811,6 +812,7 @@ private:
         u64 synced_writes{~u64{0}};
         u32 copy_begin{};  ///< Bytes of the page the copy holds (a buffer can end inside it)
         u32 copy_end{};
+        u64 copy_writer{}; ///< What recorded the copy (Nx2CopyListPages)
         /// Written outside a compute dispatch or a DMA copy (a draw's storage writes) at least
         /// once: the front can't tell from what it sent which draws write the page, so it reads
         /// no copy. A draw's writes reach a pushbuffer fetch only after a host-level wait, so

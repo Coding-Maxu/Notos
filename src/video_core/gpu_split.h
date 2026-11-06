@@ -437,7 +437,8 @@ private:
         size_t space;           ///< Address space of `data`; 0 when the words are not known
         std::vector<u32> data;  ///< The words written over [begin, end), when known
     };
-    static constexpr size_t MaxRangedWrites = 256;
+    /// Ranged writes kept before the oldest counts for every read again (EDEN_NX2_RANGED_MAX).
+    static size_t MaxRangedWrites();
     std::deque<RangedWrite> ranged_writes;
     struct QueuedRelease {
         u64 position;

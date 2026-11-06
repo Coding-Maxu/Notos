@@ -52,6 +52,7 @@
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_query_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/nx2_indirect_grid.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/renderer_vulkan/vk_state_tracker.h"
@@ -311,7 +312,7 @@ RasterizerVulkan::~RasterizerVulkan() {
 
 // Experimental adaptation of PokeDinner commit 76df4591a747: execute the reset shader's
 // indirect record writes on the host until general GPU-address translation is available.
-bool RasterizerVulkan::TryNx2IndirectReset(bool is_indexed, u32 instance_count) {
+bool RasterizerVulkan::IsNx2IndirectReset(bool is_indexed, u32 instance_count) {
     static const bool enabled = [] {
         const char* value = std::getenv("EDEN_NX2_RESETFIX");
         return !value || std::string_view{value} != "0";
@@ -330,9 +331,14 @@ bool RasterizerVulkan::TryNx2IndirectReset(bool is_indexed, u32 instance_count) 
         return false;
     }
     gpu_memory->ReadBlock(program + 128, code.data(), sizeof(code));
-    if (!VideoCommon::NativeIndirectReset::Matches(code)) {
+    return VideoCommon::NativeIndirectReset::Matches(code);
+}
+
+bool RasterizerVulkan::TryNx2IndirectReset(bool is_indexed, u32 instance_count) {
+    if (!IsNx2IndirectReset(is_indexed, instance_count)) {
         return false;
     }
+    const auto& draw = maxwell3d->draw_manager.draw_state;
     FlushWork();
     gpu_memory->FlushCaching();
     const auto reject = [](std::string_view reason) {
@@ -704,6 +710,86 @@ void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::Memory
 
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
+    // A vertex count GPU work wrote (nx2_indirect_grid.h): drawn with that count, read on the GPU.
+    // Draws that need the count here (the indirect reset, quads, a first vertex) read the words,
+    // which waits for the GPU on this thread.
+    std::optional<std::pair<VkBuffer, u32>> gpu_count;
+    if (!is_indexed && Tegra::Nx2IndirectGrid::AnyLive()) [[unlikely]] {
+        auto& draw_state = maxwell3d->draw_manager.draw_state;
+        const u32 count = draw_state.vertex_buffer.count;
+        if (Tegra::Nx2IndirectGrid::LooksLikeDrawPlaceholder(count)) {
+            auto& grid = Tegra::Nx2IndirectGrid::Get();
+            Tegra::Nx2IndirectGrid::LogCounts();
+            const auto source = Tegra::Nx2IndirectGrid::MatchDrawCount(count);
+            if (!source) {
+                grid.skipped.fetch_add(1, std::memory_order_relaxed);
+                static std::atomic<u32> logged{};
+                if (logged.fetch_add(1) < 8) {
+                    LOG_ERROR(Render_Vulkan, "GPU-counted draw {:#x} lost its source: skipped", count);
+                }
+                return;
+            }
+            const u32 first = draw_state.vertex_buffer.first;
+            const bool first_placeholder =
+                first == Tegra::Nx2IndirectGrid::DrawPlaceholder(
+                             count & (Tegra::Nx2IndirectGrid::Slots - 1), 1);
+            const bool on_gpu = (first == 0 || first_placeholder) &&
+                                draw_state.topology != Maxwell::PrimitiveTopology::Quads &&
+                                draw_state.topology != Maxwell::PrimitiveTopology::QuadStrip &&
+                                device.IsExtTransformFeedbackSupported() &&
+                                !IsNx2IndirectReset(is_indexed, instance_count);
+            if (!on_gpu) {
+                std::array<u32, 2> words{};
+                gpu_memory->ReadBlock(*source, words.data(), sizeof(words));
+                draw_state.vertex_buffer.count = words[0];
+                if (first_placeholder) {
+                    draw_state.vertex_buffer.first = words[1];
+                }
+                grid.draws_refused.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                std::scoped_lock lock{buffer_cache.mutex};
+                const auto [buffer, offset] = buffer_cache.ObtainBuffer(
+                    *source, sizeof(u32), VideoCommon::ObtainBufferSynchronize::FullSynchronize,
+                    VideoCommon::ObtainBufferOperation::DoNothing);
+                gpu_count.emplace(buffer->Handle(), offset);
+                // The count comes from a dispatch before: make its writes visible to the draw's
+                // indirect read (once per batch of dispatches; it ends a render pass).
+                if (std::exchange(compute_since_count_barrier, false)) {
+                    static constexpr VkMemoryBarrier COUNT_BARRIER{
+                        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                        .pNext = nullptr,
+                        .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
+                        .dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT |
+                                         VK_ACCESS_TRANSFORM_FEEDBACK_COUNTER_READ_BIT_EXT |
+                                         VK_ACCESS_MEMORY_READ_BIT,
+                    };
+                    scheduler.RequestOutsideRenderPassOperationContext();
+                    scheduler.Record([](vk::CommandBuffer cmdbuf) {
+                        cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,
+                                               VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                                               0, COUNT_BARRIER);
+                    });
+                }
+                static const bool log_counts = [] {
+                    const char* value = std::getenv("EDEN_NX2_INDIRECT_GRID");
+                    return value != nullptr && value[0] == '2';
+                }();
+                if (log_counts) {
+                    std::array<u32, 2> words{};
+                    gpu_memory->ReadBlock(*source, words.data(), sizeof(words));
+                    static std::atomic<u32> logged{};
+                    if (logged.fetch_add(1) < 40) {
+                        LOG_INFO(Render_Vulkan,
+                                 "GPU-counted draw from {:#x}: count {} first {} instances {} topology {}",
+                                 *source, words[0], words[1], instance_count,
+                                 static_cast<u32>(draw_state.topology));
+                    }
+                }
+                draw_state.vertex_buffer.first = 0;
+                grid.draws.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    }
     {
         // A draw's first and count can come from memory a skipped (rejected) compute program
         // should have written. Past 16M vertices they are garbage: building the quad index
@@ -713,7 +799,7 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
         const u64 first = is_indexed ? state.index_buffer.first : state.vertex_buffer.first;
         const u64 count = is_indexed ? state.index_buffer.count : state.vertex_buffer.count;
         constexpr u64 MaxVertices = u64{1} << 24;
-        if (first + count > MaxVertices) {
+        if (!gpu_count && first + count > MaxVertices) {
             static std::atomic<u32> skipped{};
             if (skipped.fetch_add(1, std::memory_order_relaxed) < 16) {
                 LOG_WARNING(HW_GPU, "Draw skipped: {} {} from {} (vertex/index count past {})",
@@ -722,7 +808,7 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
             return;
         }
     }
-    if (TryNx2IndirectReset(is_indexed, instance_count)) {
+    if (!gpu_count && TryNx2IndirectReset(is_indexed, instance_count)) {
         return;
     }
     TraceWindowTarget(*maxwell3d, *gpu_memory, is_indexed ? "draw-indexed" : "draw",
@@ -834,9 +920,21 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
                      regs.blend.enable[0], seen.size());
         }
     }
-    PrepareDraw(is_indexed, [this, is_indexed, instance_count] {
+    PrepareDraw(is_indexed, [this, is_indexed, instance_count, gpu_count] {
         const auto& draw_state = maxwell3d->draw_manager.draw_state;
         const u32 num_instances{instance_count};
+        if (gpu_count) [[unlikely]] {
+            scheduler.Record([this, counter = *gpu_count, num_instances,
+                              base_instance = draw_state.base_instance](vk::CommandBuffer cmdbuf) {
+                if (scheduler.GraphicsPipelineMissing()) {
+                    return;
+                }
+                // Stride 1: the vertex count is the counter's value.
+                cmdbuf.DrawIndirectByteCountEXT(num_instances, base_instance, counter.first,
+                                                counter.second, 0, 1);
+            });
+            return;
+        }
         const DrawParams draw_params{MakeDrawParams(draw_state, num_instances, is_indexed)};
         if (VideoCommon::RenderTrace::SampleFrame(render_trace_frame) && render_trace_draws <= 2048) {
             LOG_DEBUG(Render_Vulkan,
@@ -1517,6 +1615,19 @@ void RasterizerVulkan::DispatchCompute() {
         const auto [buffer, offset] =
             buffer_cache.ObtainBuffer(*indirect_address, 12, sync_info, post_op);
         scheduler.RequestOutsideRenderPassOperationContext();
+        // The arguments may come from GPU work just before (nx2_indirect_grid.h).
+        static constexpr VkMemoryBarrier INDIRECT_BARRIER{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_MEMORY_READ_BIT,
+        };
+        scheduler.Record([](vk::CommandBuffer cmdbuf) {
+            cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,
+                                   VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT |
+                                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                   0, INDIRECT_BARRIER);
+        });
         scheduler.TraceComputePipeline(pipeline->ShaderHash());
         scheduler.Record([this, pipeline, indirect_buffer = buffer->Handle(),
                           indirect_offset = offset](vk::CommandBuffer cmdbuf) {
@@ -1527,7 +1638,8 @@ void RasterizerVulkan::DispatchCompute() {
                 cmdbuf.DispatchIndirect(indirect_buffer, indirect_offset);
             });
         });
-        SubmitNx2ListCopies();
+        compute_since_count_barrier = true;
+        SubmitNx2ListCopies(pipeline->ShaderHash());
         return;
     }
     const std::array<u32, 3> dim{qmd.grid_dim_x, qmd.grid_dim_y, qmd.grid_dim_z};
@@ -1558,7 +1670,8 @@ void RasterizerVulkan::DispatchCompute() {
             TextureCacheRuntime::CopyByteAddressedShadow(cmdbuf, *byte_addressed_shadow, true);
         }
     });
-    SubmitNx2ListCopies();
+    compute_since_count_barrier = true;
+    SubmitNx2ListCopies(pipeline->ShaderHash());
 
     // Log compute dispatch
     if (GPU::Logging::IsActive() &&
@@ -1600,10 +1713,10 @@ void Vulkan::RasterizerVulkan::DisableGraphicsUniformBuffer(size_t stage, u32 in
 
 void RasterizerVulkan::FlushAll() {}
 
-void RasterizerVulkan::SubmitNx2ListCopies() {
+void RasterizerVulkan::SubmitNx2ListCopies(u64 writer) {
     // Submitted at once: ReadGpuWrittenCommands waits on these copies, so they can't sit out
     // the longer DeferFlush interval (#161).
-    if (buffer_cache.Nx2CopyListPages(scheduler.CurrentTick()) &&
+    if (buffer_cache.Nx2CopyListPages(scheduler.CurrentTick(), writer) &&
         (VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::FenceFlush) || !scheduler.DeferFlush())) {
         scheduler.Flush();
     }
@@ -2236,6 +2349,53 @@ Tegra::Engines::AccelerateDMAInterface& RasterizerVulkan::AccessAccelerateDMA() 
 
 void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_size,
                                                 std::span<const u8> memory) {
+    // Grid placeholders among the words (a compute macro's constant buffer of its dispatch's
+    // size): the GPU copies the words they stand for over them once the write is done.
+    if (Tegra::Nx2IndirectGrid::AnyLive() && !Tegra::Nx2IndirectGrid::g_writing_qmd &&
+        copy_size >= 4) [[unlikely]] {
+        // (source, destination, words): x alone, or x, y and z when all three are placeholders.
+        boost::container::small_vector<std::tuple<GPUVAddr, GPUVAddr, u32>, 2> grids;
+        const size_t words = (std::min)(copy_size, memory.size()) / sizeof(u32);
+        const auto word = [&](size_t i) {
+            u32 value;
+            std::memcpy(&value, memory.data() + i * sizeof(u32), sizeof(value));
+            return value;
+        };
+        for (size_t i = 0; i < words; ++i) {
+            const auto match = Tegra::Nx2IndirectGrid::MatchX(word(i));
+            if (!match) {
+                continue;
+            }
+            const auto [slot, source] = *match;
+            const bool all = i + 3 <= words &&
+                             word(i + 1) == Tegra::Nx2IndirectGrid::Placeholder(slot, 1) &&
+                             word(i + 2) == Tegra::Nx2IndirectGrid::Placeholder(slot, 2);
+            grids.emplace_back(source, address + i * sizeof(u32), all ? 3U : 1U);
+        }
+        if (!grids.empty()) {
+            AccelerateInlineToMemoryImpl(address, copy_size, memory);
+            // The write's own invalidation first: it would upload the placeholders over the copy.
+            gpu_memory->FlushCaching();
+            std::scoped_lock lock{buffer_cache.mutex};
+            for (const auto& [source, destination, count] : grids) {
+                Tegra::Nx2IndirectGrid::Get().copied.fetch_add(1, std::memory_order_relaxed);
+                if (!buffer_cache.DMACopy(source, destination, count * sizeof(u32))) {
+                    static std::atomic<u32> logged{};
+                    if (logged.fetch_add(1) < 8) {
+                        LOG_WARNING(Render_Vulkan,
+                                    "GPU-sized dispatch: no host buffer to copy its size from "
+                                    "{:#x} to {:#x}", source, destination);
+                    }
+                }
+            }
+            return;
+        }
+    }
+    AccelerateInlineToMemoryImpl(address, copy_size, memory);
+}
+
+void RasterizerVulkan::AccelerateInlineToMemoryImpl(GPUVAddr address, size_t copy_size,
+                                                    std::span<const u8> memory) {
     auto cpu_addr = gpu_memory->GpuToCpuAddress(address);
     if (gpu_memory->UsesNativeTiling()) {
         u32 first_word{};
