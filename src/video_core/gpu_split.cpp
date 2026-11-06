@@ -376,6 +376,18 @@ bool GpuSplit::HasQueuedMemoryWriters(GPUVAddr begin, GPUVAddr end) {
     return MemoryWriterTarget(done, begin, end, method) > done;
 }
 
+u32 GpuSplit::QueuedWriterKind(GPUVAddr begin, GPUVAddr end, u32& method) {
+    const u64 done = consumed.load(std::memory_order_acquire);
+    const u64 target = MemoryWriterTarget(done, begin, end, method);
+    if (target <= done) {
+        return 0;
+    }
+    return target == last_writer_position         ? 1
+           : target == last_sync_position         ? 2
+           : target == last_memory_write_position ? 3
+                                                  : 4;
+}
+
 void GpuSplit::NoteRelease(u64 device, GPUVAddr address, u32 payload) {
     static const bool enabled = [] {
         const char* const value = std::getenv("EDEN_NX2_ACQUIRE_QUEUED");

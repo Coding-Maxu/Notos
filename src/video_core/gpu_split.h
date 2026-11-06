@@ -303,6 +303,9 @@ public:
     /// Whether WaitForMemoryWriters(begin, end) would wait now: work that may write the range is
     /// still queued for the back.
     bool HasQueuedMemoryWriters(GPUVAddr begin, GPUVAddr end);
+    /// Diagnostics: the newest queued work that may write [begin, end): 0 none, 1 compute or
+    /// copy, 2 work before a host sync, 3 an unranged memory write (`method`), 4 a ranged write.
+    u32 QueuedWriterKind(GPUVAddr begin, GPUVAddr end, u32& method);
     /// A semaphore release that writes `payload` at device address `device` (from GPU address
     /// `address`) was just sent (a puller release, a 3D payload report).
     void NoteRelease(u64 device, GPUVAddr address, u32 payload);
