@@ -16,6 +16,7 @@
 #include <thread>
 #include <vector>
 #include <type_traits>
+#include <unordered_map>
 
 #include "common/common_types.h"
 #include "video_core/engines/engine_interface.h"
@@ -310,6 +311,27 @@ public:
     /// Whether a noted write that overlaps [begin, begin + size) is still queued (or too many
     /// are queued to tell).
     bool HasQueuedWritesTo(u64 begin, u64 size);
+    /// Front: a write that lands when a host query completes or a fence signals (counter
+    /// reports, timed releases), not when the back runs it (Tegra::Nx2AsyncReportsSettled).
+    void NoteAsyncWrite(u64 begin, u64 size) {
+        for (u64 slot = begin >> 4; slot <= (begin + size - 1) >> 4; ++slot) {
+            async_writes[slot] = write_position;
+        }
+    }
+    /// Front: the ring position of the newest async write noted to these bytes, or 0.
+    [[nodiscard]] u64 HasAsyncWrite(u64 begin, u64 size) const {
+        u64 newest = 0;
+        if (async_writes.empty()) {
+            return newest;
+        }
+        for (u64 slot = begin >> 4; slot <= (begin + size - 1) >> 4; ++slot) {
+            if (const auto it = async_writes.find(slot); it != async_writes.end()) {
+                newest = (std::max)(newest, it->second);
+            }
+        }
+        return newest;
+    }
+
     /// A host-level wait was just sent (a syncpoint acquire, a host WFI, a GP entry with its sync
     /// bit; semaphore acquires drain): the guest's GPU work before it is complete before the
     /// commands after it are fetched.
@@ -408,6 +430,8 @@ private:
     static inline bool compute_sink{};
     static inline bool ring_pairs{};
     static constexpr u32 MaxPairs = 4096;
+
+    std::unordered_map<u64, u64> async_writes; ///< Front: 16-byte slot -> ring position
 
     static constexpr size_t RingWords = size_t{1} << 20; // 8 MiB
     static constexpr size_t RingMask = RingWords - 1;
