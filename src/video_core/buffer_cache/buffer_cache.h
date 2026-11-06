@@ -283,9 +283,9 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
                                            device_addr_end_aligned - device_addr_start_aligned);
     // A preflushable mark persists and downloads later GPU writes at every fence. Native titles
     // instead keep read traps and flush on demand; EDEN_NX2_PREFLUSH=1 restores preflushing.
-    // Ocarina of Time preflushes: its CPU reads a few GPU-written pages (auto exposure among
-    // them) ~170 times a second, and each trap waited for the GPU threads and the host GPU
-    // (~45 -> 47 fps on the Kokiri porch).
+    // Not Ocarina of Time either: preflushing its CPU's ~170 reads a second of GPU-written pages
+    // was worth ~3 fps, but a third of loads into Castle Town then rendered overexposed and
+    // tinted (stale or wrong exposure data), against none with the traps.
     static const std::optional<bool> forced_preflush = []() -> std::optional<bool> {
         const char* value = std::getenv("EDEN_NX2_PREFLUSH");
         if (value != nullptr) {
@@ -293,10 +293,8 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
         }
         return std::nullopt;
     }();
-    constexpr u64 OcarinaOfTimeProgramId = 0x0400486024DEC000ULL;
     const bool preflush =
-        forced_preflush.value_or(!Tegra::g_nx2_ampere.load(std::memory_order_relaxed) ||
-                                 Settings::GetCurrentProgramID() == OcarinaOfTimeProgramId);
+        forced_preflush.value_or(!Tegra::g_nx2_ampere.load(std::memory_order_relaxed));
     if (!area->preemtive) {
         if (Nx2DownloadTrace::g_enabled) [[unlikely]] {
             Nx2DownloadTrace::Marked(device_addr_start_aligned,
