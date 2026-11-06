@@ -135,7 +135,7 @@ inline u64 Ticks() {
 struct ThreadData {
     std::array<u64, static_cast<size_t>(Zone::Count)> exclusive_ns{};
     std::array<u64, static_cast<size_t>(Zone::Count)> count{};
-    std::array<u64, 32> counters{}; ///< See Counter
+    std::array<u64, 64> counters{}; ///< See Counter (static_assert below)
     std::array<u64, static_cast<size_t>(DmaWaitCause::Count)> dma_wait_causes{};
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_ns{};
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_count{};
@@ -243,8 +243,16 @@ enum class Counter : u32 {
     DmaReadsWaitUnknown, ///< Of those, waited for a write the front can't place
     DmaReadsWaitGpu,     ///< waited for all queued GPU work with unknown destinations
     DmaReadsWaitWrite,   ///< waited for a noted write to the words' pages
+    AcquirePolls,   ///< Polls of a waiting acquire (Puller::CanResumeAcquire)
+    AcquirePollsFast, ///< Of AcquirePolls: answered from the word without draining the back
+    SemNoFastPath,    ///< SemaphoreReadableNow false: split off or EDEN_NX2_SEM_FAST=0
+    SemGpuWrittenPage, ///< SemaphoreReadableNow false: the word's page is marked GPU-written
+    SemAsyncPending,  ///< SemaphoreReadableNow false: a counter report or timed release is pending
+    SemWritersWait,   ///< SemaphoreReadableNow false: WaitForWritesTo gave up
+    AcquireNoDrain,   ///< Acquires of a current word not met yet that registered without a drain
     Count,
 };
+static_assert(static_cast<size_t>(Counter::Count) <= 64, "Counter outgrew the counters array");
 static_assert(static_cast<size_t>(Counter::Count) <= std::tuple_size_v<decltype(ThreadData::counters)>);
 
 /// Method calls on this thread by method (3D registers on the back, macros on the front), and
@@ -367,7 +375,7 @@ inline void Report(const char* thread_name = "GPU thread") {
     line += fmt::format(" | 3D register writes {:.0f} ({:.0f} same value)",
                         static_cast<double>(data.counters[4]) * 1e9 / window,
                         static_cast<double>(data.counters[5]) * 1e9 / window);
-    line += fmt::format(" | acquires {:.0f} ({:.0f} waited)",
+    line += fmt::format(" | acquires {:.0f} ({:.0f} waited, {:.0f} polls, {:.0f} without drain)",
                         static_cast<double>(data.counters[6]) * 1e9 / window,
                         static_cast<double>(data.counters[7]) * 1e9 / window);
     if (const u64 queued = data.counters[static_cast<size_t>(Counter::AcquiresQueued)]; queued != 0) {
@@ -419,6 +427,22 @@ inline void Report(const char* thread_name = "GPU thread") {
                             static_cast<double>(early) * 1e9 / window,
                             rate(Counter::DmaReadsWaitUnknown), rate(Counter::DmaReadsWaitGpu),
                             rate(Counter::DmaReadsWaitWrite));
+    }
+    {
+        const auto rate = [&](Counter counter) {
+            return static_cast<double>(data.counters[static_cast<size_t>(counter)]) * 1e9 / window;
+        };
+        if (data.counters[static_cast<size_t>(Counter::AcquirePolls)] != 0 ||
+            data.counters[static_cast<size_t>(Counter::AcquireNoDrain)] != 0) {
+            line += fmt::format(" | acquire polls {:.0f} ({:.0f} without a drain), acquires "
+                                "waiting without a drain {:.0f}, semaphore word not readable: no "
+                                "fast path {:.0f}, GPU-written page {:.0f}, report pending {:.0f}, "
+                                "writers {:.0f}",
+                                rate(Counter::AcquirePolls), rate(Counter::AcquirePollsFast),
+                                rate(Counter::AcquireNoDrain), rate(Counter::SemNoFastPath),
+                                rate(Counter::SemGpuWrittenPage), rate(Counter::SemAsyncPending),
+                                rate(Counter::SemWritersWait));
+        }
     }
     std::string drains;
     for (size_t i = 0; i < data.drain_count.size(); ++i) {

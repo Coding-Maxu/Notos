@@ -335,6 +335,8 @@ void ReleaseFences(DmaPusher& dma_pusher) {
 
 } // Anonymous namespace
 
+static bool SemaphoreReadableNow(DmaPusher& dma_pusher, GPUVAddr address, u32& word);
+
 bool Puller::PendingAcquire::Matches(u32 current) const {
     switch (static_cast<GpuSemaphoreOperation>(operation)) {
     case GpuSemaphoreOperation::AcquireEqual:
@@ -351,6 +353,24 @@ bool Puller::PendingAcquire::Matches(u32 current) const {
 bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
     if (!pending_acquire) {
         return true;
+    }
+    VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquirePolls, 1);
+    // Fast path (EDEN_NX2_SEM_FAST), as for the first check in ProcessSemaphoreTriggerMethod:
+    // when the word is current without draining the back, answer from it. Ocarina of Time polls
+    // each waiting acquire about 12 times before it is met, and every poll drained the back
+    // (about 380 ms/s of the front's time). A poll that is not met for 2 s takes the drained
+    // path below, which reports it.
+    if (Nx2SemaphoreWaiters::Get().Latched(this)) {
+        // The back ran a release that met the value and latched this waiter: resume at once.
+        VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquirePollsFast, 1);
+        return true;
+    }
+    if (pending_acquire->reported ||
+        std::chrono::steady_clock::now() - pending_acquire->since < std::chrono::seconds{2}) {
+        if (u32 word{}; SemaphoreReadableNow(dma_pusher, pending_acquire->address, word)) {
+            VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquirePollsFast, 1);
+            return pending_acquire->Matches(word);
+        }
     }
     if (MetByQueuedRelease(dma_pusher, *pending_acquire)) {
         return true;
@@ -545,8 +565,9 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
             return;
         }
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireChecks, 1);
-        if (u32 word{}; SemaphoreReadableNow(dma_pusher, acquire.address, word) &&
-                        acquire.Matches(word)) {
+        u32 word{};
+        const bool readable = SemaphoreReadableNow(dma_pusher, acquire.address, word);
+        if (readable && acquire.Matches(word)) {
             return;
         }
         u32 miss = 0;
@@ -612,14 +633,21 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
                 return;
             }
         }
-        DrainBack();
-        if (acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address))) {
-            VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireMetAfterDrain, 1);
-            record(AcquireTrace::MetAfterDrain);
-            if (learn) {
-                AcquireLearning::Instance().NoteMet(acquire.address);
+        if (readable) {
+            // The word is current (no queued or GPU write the front knows of can change it):
+            // the value comes from the CPU or another channel later, and the polls in
+            // CanResumeAcquire pick it up without a drain (from zortos293/Lichii#231).
+            VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireNoDrain, 1);
+        } else {
+            DrainBack();
+            if (acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address))) {
+                VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireMetAfterDrain, 1);
+                record(AcquireTrace::MetAfterDrain);
+                if (learn) {
+                    AcquireLearning::Instance().NoteMet(acquire.address);
+                }
+                return;
             }
-            return;
         }
         // Registered before the fences run, so a release among them that meets the value counts
         // even if a later one overwrites it.
@@ -628,7 +656,11 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
             waiters.Add(this, *device, acquire.value, acquire.operation);
         }
         ReleaseFences(dma_pusher);
-        if (!waiters.Latched(this) && !acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address))) {
+        const bool met_now = readable
+                                 ? (SemaphoreReadableNow(dma_pusher, acquire.address, word) &&
+                                    acquire.Matches(word))
+                                 : acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address));
+        if (!waiters.Latched(this) && !met_now) {
             pending_acquire = acquire;
             dma_pusher.suspensions.fetch_add(1, std::memory_order_release);
             VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireWaits, 1);
@@ -777,16 +809,20 @@ static void NoteSemaphoreWrite(DmaPusher& dma_pusher, GPUVAddr address,
 static bool SemaphoreReadableNow(DmaPusher& dma_pusher, GPUVAddr address, u32& word) {
     auto& split = VideoCommon::GpuSplit::Get();
     const int mode = VideoCore::Nx2Debug::g_sem_fast.load(std::memory_order_relaxed);
+    using VideoCommon::Nx2Profile::Counter;
     if (!split.Active() || mode == 0) {
+        VideoCommon::Nx2Profile::Add(Counter::SemNoFastPath, 1);
         return false;
     }
     const auto device = dma_pusher.memory_manager.GpuToCpuAddress(address);
     if (!device || Nx2IsGpuWritten(*device)) {
+        VideoCommon::Nx2Profile::Add(Counter::SemGpuWrittenPage, 1);
         return false;
     }
     if (const u64 async_position = split.HasAsyncWrite(*device, 4);
         async_position != 0 &&
         (async_position > split.ConsumedNow() || !Nx2AsyncReportsSettled(*device, 4))) {
+        VideoCommon::Nx2Profile::Add(Counter::SemAsyncPending, 1);
         return false;
     }
     if (mode >= 2) {
@@ -797,6 +833,7 @@ static bool SemaphoreReadableNow(DmaPusher& dma_pusher, GPUVAddr address, u32& w
         }
     }
     if (!split.WaitForWritesTo(*device, 16)) {
+        VideoCommon::Nx2Profile::Add(Counter::SemWritersWait, 1);
         return false;
     }
     word = dma_pusher.memory_manager.Read<u32>(address);
