@@ -106,6 +106,9 @@ private:
     void LoadingTick();
     void ReadNativeProgress();
     void EndLoading();
+    void StartClosing(bool emulated);
+    void EndClosing();
+    void StartReveal();
     bool GamesFullscreen() const;
     /// A click on the open menu: an entry, or outside the menu (closes it).
     void MenuMouse(const QPoint& pos, Qt::MouseButton button);
@@ -215,6 +218,13 @@ private:
     double scroll = 0;
     bool list_mode = false;
     QString pad_name; ///< shown next to the clock
+    // Closing a game: the closing screen shows until the game is gone.
+    bool closing = false;
+    bool closing_emulated = false;
+    qint64 closing_start = 0;
+    Game running_game;            ///< the game started from here, for that screen
+    bool reveal_after_game = false;
+    bool intro_reveal_only = false; ///< the opening without its emblem: back from a game
     double menu_show = 0;   ///< 0..1: the open menu coming in
     double menu_cursor = 0; ///< where the highlight is, gliding to menu_index
 

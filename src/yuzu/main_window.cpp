@@ -2458,6 +2458,11 @@ bool MainWindow::OnShutdownBegin() {
 }
 
 void MainWindow::OnShutdownBeginDialog() {
+    // Notos shows its own closing screen (Notos::Home::OnEmulationStopping) when the game runs in
+    // the main window.
+    if (ui->action_Single_Window_Mode->isChecked()) {
+        return;
+    }
     shutdown_dialog =
         new OverlayDialog(this, *QtCommon::system, QString{}, tr("Closing software..."), QString{},
                           QString{}, Qt::AlignHCenter | Qt::AlignVCenter);

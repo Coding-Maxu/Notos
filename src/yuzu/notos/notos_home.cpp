@@ -504,8 +504,22 @@ void Home::AnimTick() {
             }
         }
     }
+    if (closing && closing_emulated) {
+        // Kept on top while the window changes under it.
+        PlaceOverlay();
+        if (!overlay->isVisible()) {
+            overlay->show();
+        }
+        overlay->raise();
+        overlay->update();
+    }
     if (!isVisible()) {
         return;
+    }
+    // The emulator shows its game list again when a game ends: never next to the home screen.
+    if (!list_mode && (game_list->isVisible() || placeholder->isVisible())) {
+        game_list->hide();
+        placeholder->hide();
     }
     // The opening plays on frames actually shown: Notos is busy for a few seconds when it starts,
     // and a sequence timed on the clock would be over before anyone saw it.
@@ -519,6 +533,7 @@ void Home::AnimTick() {
         intro_start += std::min(dt, 34.0);
         if (intro_start >= IntroTotal) {
             intro_start = -1;
+            intro_reveal_only = false;
         }
     }
     bool moving = intro_pending || intro_start >= 0;
@@ -690,6 +705,12 @@ void Home::Restore() {
         !window->isMinimized()) {
         ApplyFullscreen();
     }
+    if (closing && closing_emulated) {
+        EndClosing(); // the game is gone: the home screen is back under the closing screen
+    } else if (reveal_after_game && !list_mode) {
+        StartReveal();
+    }
+    reveal_after_game = false;
 }
 
 void Home::OnEmulationStarting() {
@@ -718,10 +739,74 @@ void Home::OnEmulationStopping() {
     if (loading_emulated) {
         EndLoading();
     }
-    if (overlay->isVisible()) {
+    home_down = false;
+    reveal_after_game = true;
+    if (hooks.single_window()) {
+        StartClosing(true); // in place of the Home menu, if it was open
+    } else if (overlay->isVisible()) {
         LeaveGameMenu(false);
     }
-    home_down = false;
+}
+
+// ---- closing a game
+
+void Home::StartClosing(bool emulated) {
+    menu.clear();
+    paused_by_menu = false;
+    closing = true;
+    closing_emulated = emulated;
+    closing_start = anim_clock.elapsed();
+    loading_game = running_game;
+    if (loading_game.name.isEmpty()) {
+        const QStringList parts = window->windowTitle().split(QStringLiteral(" | "));
+        loading_game.name = parts.size() > 3 ? parts[3] : QStringLiteral("Notos");
+    }
+    loading_progress = -1;
+    loading_status = QStringLiteral("Cerrando…");
+    if (emulated) {
+        // Over the whole screen: the window leaves its game size underneath.
+        PlaceOverlay();
+        overlay->show();
+        overlay->raise();
+        qApp->installEventFilter(this);
+    }
+    update();
+}
+
+void Home::EndClosing() {
+    if (!closing) {
+        return;
+    }
+    // Long enough to be read, even when the game is gone at once.
+    const qint64 shown = anim_clock.elapsed() - closing_start;
+    if (shown < 800) {
+        QTimer::singleShot(800 - shown, this, &Home::EndClosing);
+        return;
+    }
+    const bool emulated = closing_emulated;
+    closing = false;
+    closing_emulated = false;
+    loading_game = {};
+    running_game = {};
+    loading_status.clear();
+    if (emulated) {
+        overlay_timer->stop();
+        overlay->hide();
+        qApp->removeEventFilter(this);
+        setFocus();
+    }
+    StartReveal();
+    update();
+}
+
+void Home::StartReveal() {
+    // The covers and buttons come in as at the opening, without the emblem.
+    if (intro_pending || (intro_start >= 0 && !intro_reveal_only)) {
+        return;
+    }
+    intro_reveal_only = true;
+    intro_start = IntroUi - 60;
+    update();
 }
 
 void Home::OnLoadProgress(int stage, qulonglong value, qulonglong total) {
@@ -885,9 +970,16 @@ void Home::PaintLoading(QPainter& p, const QRect& area) {
     p.setRenderHint(QPainter::Antialiasing);
     p.setRenderHint(QPainter::SmoothPixmapTransform);
     p.setRenderHint(QPainter::TextAntialiasing);
-    p.fillRect(QRectF(0, 0, w, h), bg);
+    // Closing a game: the same screen comes in over it, the cover settling down.
+    const double show =
+        closing ? EaseOut((anim_clock.elapsed() - closing_start) / 450.0) : 1.0;
+    QColor backdrop = bg;
+    backdrop.setAlphaF(show);
+    p.fillRect(QRectF(0, 0, w, h), backdrop);
+    p.setOpacity(show);
+    const int phase = closing ? static_cast<int>(anim_clock.elapsed() / 33) : loading_phase;
 
-    const double size = std::round(std::clamp(h * 0.5, 160.0, 520.0));
+    const double size = std::round(std::clamp(h * 0.5, 160.0, 520.0) * (1.12 - 0.12 * show));
     const QFont name_font = Font(font(), 28 * s, QFont::DemiBold);
     const QFont status_font = Font(font(), 16 * s);
     const double name_h = QFontMetricsF(name_font).height();
@@ -943,7 +1035,7 @@ void Home::PaintLoading(QPainter& p, const QRect& area) {
                               bar_h / 2, bar_h / 2);
         }
     } else {
-        const double at = (loading_phase % 60) / 60.0 * 1.3 - 0.3;
+        const double at = (phase % 60) / 60.0 * 1.3 - 0.3;
         const double left = std::max(track.left(), track.left() + track_w * at);
         const double right = std::min(track.right(), track.left() + track_w * (at + 0.3));
         if (right > left) {
@@ -958,6 +1050,10 @@ void Home::PaintLoading(QPainter& p, const QRect& area) {
     p.setFont(status_font);
     p.drawText(QRectF(32 * s, y, w - 64 * s, status_h), Qt::AlignCenter, loading_status);
 
+    if (closing) {
+        p.restore();
+        return;
+    }
     // How to cancel.
     p.setFont(Font(font(), HintSize * s));
     p.drawText(QRectF(0, h - BottomBar * s, w - SideMargin * s, BottomBar * s),
@@ -979,7 +1075,7 @@ Overlay::Overlay(Home* home_) : QWidget(home_->window, OverlayFlags), home{home_
 
 void Overlay::paintEvent(QPaintEvent*) {
     QPainter p(this);
-    if (home->loading) {
+    if (home->loading || home->closing) {
         home->PaintLoading(p, rect());
     } else {
         home->PaintMenu(p, rect());
@@ -1001,7 +1097,7 @@ void Overlay::keyPressEvent(QKeyEvent* event) {
 }
 
 void Overlay::mousePressEvent(QMouseEvent* event) {
-    if (home->loading) {
+    if (home->loading || home->closing) {
         return;
     }
     home->MenuMouse(event->position().toPoint(), event->button());
@@ -1044,6 +1140,13 @@ void Home::PlaceOverlay() {
             overlay->show();
         }
     }
+    if (closing) {
+        const QRect screen = window->screen()->geometry();
+        if (overlay->geometry() != screen) {
+            overlay->setGeometry(screen);
+        }
+        return;
+    }
     const QRect area = render && render->isVisible()
                            ? QRect(render->mapToGlobal(QPoint(0, 0)), render->size())
                            : QRect(window->mapToGlobal(QPoint(0, 0)), window->size());
@@ -1082,6 +1185,9 @@ void Home::LeaveGameMenu(bool resume) {
 }
 
 void Home::ToggleNativeMenu() {
+    if (closing) {
+        return;
+    }
     if (loading && !native_window) {
         return;
     }
@@ -1134,6 +1240,9 @@ void Home::NativeMenuEntries() {
                                   [this] {
                                       LeaveGameMenu(false);
                                       CloseNative();
+                                      // Notos comes back over it with the closing screen.
+                                      StartClosing(false);
+                                      ShowNotos();
                                   },
                                   {}, false}});
               },
@@ -1196,6 +1305,9 @@ void Home::CloseNative() {
 }
 
 void Home::ToggleGameMenu() {
+    if (closing) {
+        return;
+    }
     if (loading) {
         return;
     }
@@ -1343,7 +1455,7 @@ void Home::paintEvent(QPaintEvent*) {
     const double s = std::max(0.45, std::min(width() / 1920.0, height() / 1080.0)) * 1.1;
     const int w = width();
     const int h = height();
-    if (loading) {
+    if (loading || closing) {
         PaintLoading(p, rect());
         return;
     }
@@ -1357,14 +1469,15 @@ void Home::paintEvent(QPaintEvent*) {
     }
     const double it = intro_start;
     const bool intro = it >= 0;
-    const double merge = intro ? EaseInOut((it - IntroMerge) / IntroMergeTime) : 1.0;
+    const bool emblem = intro && !intro_reveal_only;
+    const double merge = emblem ? EaseInOut((it - IntroMerge) / IntroMergeTime) : 1.0;
     const double ui = intro ? EaseOut((it - IntroUi) / 650.0) : 1.0;
 
     // Top bar: the Notos badge, the clock.
     const double badge = BadgeSize * s;
     const QRectF badge_rect(48 * s, TopBar * s - badge, badge, badge);
     QRectF icon_rect = badge_rect;
-    if (intro) {
+    if (emblem) {
         const double appear = EaseOut(it / 800.0);
         const double alone = 1 - merge;
         const QPointF centre(w / 2.0, h / 2.0 - 36 * s);
@@ -1896,9 +2009,13 @@ void Home::keyPressEvent(QKeyEvent* event) {
 }
 
 void Home::Nav(const QString& cmd) {
-    if (intro_start >= 0) {
+    if (closing) {
+        return;
+    }
+    if (intro_start >= 0 && !intro_reveal_only) {
         // Any press skips the opening.
         intro_start = -1;
+        intro_reveal_only = false;
         update();
         return;
     }
@@ -2181,6 +2298,7 @@ void Home::Launch(const Game& game) {
         hooks.set_game_fullscreen(GamesFullscreen());
     }
     // OnEmulationStarting shows the loading screen for it (the boot may also fail first).
+    running_game = game;
     loading_game = game;
     hooks.play(game.path, game.program_id);
     if (!loading) {
@@ -2240,6 +2358,7 @@ void Home::LaunchNative(const Game& game) {
     CloseMenu();
     loading = true;
     loading_emulated = false;
+    running_game = game;
     loading_game = game;
     loading_phase = 0;
     loading_progress = -1;
@@ -2253,6 +2372,7 @@ void Home::LaunchNative(const Game& game) {
 }
 
 void Home::NativeEnded() {
+    const bool was_closing = closing;
     if (loading && !loading_emulated) {
         EndLoading();
     }
@@ -2271,6 +2391,12 @@ void Home::NativeEnded() {
     native_exe.clear();
     native_name.clear();
     ShowNotos();
+    if (was_closing) {
+        EndClosing();
+    } else {
+        running_game = {};
+        StartReveal();
+    }
 }
 
 void Home::ShowNotos() {
