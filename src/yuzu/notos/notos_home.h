@@ -215,6 +215,8 @@ private:
     double scroll = 0;
     bool list_mode = false;
     QString pad_name; ///< shown next to the clock
+    double menu_show = 0;   ///< 0..1: the open menu coming in
+    double menu_cursor = 0; ///< where the highlight is, gliding to menu_index
 
     // Animation: the covers glide to where the selection wants them, the selected one grows, and
     // the opening sequence plays once.

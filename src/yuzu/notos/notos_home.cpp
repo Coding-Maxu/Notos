@@ -313,7 +313,7 @@ Home::Home(QMainWindow* window_, QBoxLayout* central, QWidget* game_list_, QWidg
 
     overlay = new Overlay(this);
     overlay_timer = new QTimer(this);
-    overlay_timer->setInterval(33);
+    overlay_timer->setInterval(16);
     connect(overlay_timer, &QTimer::timeout, this, [this] {
         if (overlay->isVisible()) {
             PlaceOverlay(); // follows fullscreen changes and window moves
@@ -453,8 +453,8 @@ bool Home::Rainbow() const {
 
 QColor Home::Accent() const {
     if (Rainbow()) {
-        // One turn of the colour wheel every 24 seconds.
-        return Hsv(anim_clock.elapsed() * 0.015, 0.62, 1.0);
+        // One turn of the colour wheel every 9 seconds.
+        return Hsv(anim_clock.elapsed() * 0.04, 0.62, 1.0);
     }
     const QColor color(Prefs().value(QStringLiteral("accent")).toString());
     return color.isValid() ? color : QColor(Accents[0].second);
@@ -464,7 +464,7 @@ QBrush Home::AccentBrush(const QRectF& rect) const {
     if (!Rainbow()) {
         return Accent();
     }
-    QConicalGradient gradient(rect.center(), std::fmod(anim_clock.elapsed() * 0.03, 360.0));
+    QConicalGradient gradient(rect.center(), std::fmod(anim_clock.elapsed() * 0.09, 360.0));
     for (int i = 0; i <= 6; ++i) {
         gradient.setColorAt(i / 6.0, Hsv(i * 60.0, 0.62, 1.0));
     }
@@ -476,6 +476,34 @@ void Home::AnimTick() {
     const double dt = static_cast<double>(std::min<qint64>(now - anim_last, 100));
     anim_last = now;
     ++anim_ticks;
+    // The open menu comes in and its highlight glides (also over a game, where Notos is hidden).
+    if (menu.empty()) {
+        menu_show = 0;
+    } else {
+        bool changed = false;
+        if (menu_show <= 0) {
+            menu_cursor = menu_index;
+        }
+        if (menu_show < 1) {
+            menu_show = std::min(1.0, menu_show + dt / 200.0);
+            changed = true;
+        }
+        const double gap = menu_index - menu_cursor;
+        if (std::abs(gap) > 0.01) {
+            menu_cursor += gap * (1 - std::exp(-dt / 50.0));
+            changed = true;
+        } else if (menu_cursor != menu_index) {
+            menu_cursor = menu_index;
+            changed = true;
+        }
+        if (changed) {
+            if (overlay && overlay->isVisible()) {
+                overlay->update();
+            } else {
+                update();
+            }
+        }
+    }
     if (!isVisible()) {
         return;
     }
@@ -1489,6 +1517,8 @@ void Home::paintEvent(QPaintEvent*) {
             const double order = std::max(0.0, (x - left) / cell);
             const double in = EaseOut((it - IntroUi - order * 85) / 600.0);
             outer_rect.translate((1 - in) * 180 * s, 0);
+            const double shrink = outer_rect.width() * 0.12 * (1 - in) / 2; // and grow into place
+            outer_rect.adjust(shrink, shrink, -shrink, -shrink);
             tile_opacity = in;
         }
         p.setOpacity(tile_opacity);
@@ -1581,12 +1611,22 @@ void Home::paintEvent(QPaintEvent*) {
     const double icon_d = IconSize * s;
     const double button_w = icon_d + 82 * s;
     const double buttons_x = (w - button_w * Buttons.size()) / 2;
-    const double buttons_y = area_bottom + (1 - ui) * 36 * s; // they rise in with the opening
+    const double buttons_y = area_bottom;
     button_rects.assign(Buttons.size(), QRect());
     for (int i = 0; i < static_cast<int>(Buttons.size()); ++i) {
         const bool on = row == 1 && i == button_index;
-        const QRectF circle(buttons_x + i * button_w + (button_w - icon_d) / 2, buttons_y, icon_d,
-                            icon_d);
+        // At the opening they are revealed one after the other: each fades in, rises and pops to
+        // its size.
+        double reveal = 1, pop = 1;
+        if (intro) {
+            const double x = Clamp01((it - IntroUi - 220 - i * 130) / 520.0);
+            reveal = EaseOut(x);
+            pop = 1 + 2.70158 * std::pow(x - 1, 3) + 1.70158 * std::pow(x - 1, 2); // overshoots
+        }
+        p.setOpacity(reveal);
+        const double d = icon_d * (0.55 + 0.45 * pop);
+        const QRectF circle(buttons_x + i * button_w + (button_w - d) / 2,
+                            buttons_y + (icon_d - d) / 2 + (1 - reveal) * 34 * s, d, d);
         button_rects[i] = QRectF(buttons_x + i * button_w, buttons_y, button_w, icon_d + 34 * s)
                               .toAlignedRect();
         p.setBrush(panel);
@@ -1596,8 +1636,9 @@ void Home::paintEvent(QPaintEvent*) {
         const QPixmap pixmap = FritchiiUi::Glyph(QString::fromLatin1(Buttons[i].icon),
                                                  text.rgb() & 0xFFFFFF, glyph)
                                    .pixmap(glyph, glyph);
-        p.drawPixmap(QRectF(circle.center().x() - glyph / 2.0, circle.center().y() - glyph / 2.0,
-                            glyph, glyph),
+        const double drawn = glyph * d / icon_d;
+        p.drawPixmap(QRectF(circle.center().x() - drawn / 2.0, circle.center().y() - drawn / 2.0,
+                            drawn, drawn),
                      pixmap, QRectF(pixmap.rect()));
         if (on) {
             p.setPen(accent);
@@ -1608,6 +1649,7 @@ void Home::paintEvent(QPaintEvent*) {
         }
     }
 
+    p.setOpacity(ui);
     // Bottom bar: the keys and buttons that do something here.
     const double bar_y = h - BottomBar * s;
     p.setPen(QPen(sub, 1));
@@ -1632,68 +1674,163 @@ void Home::paintEvent(QPaintEvent*) {
 }
 
 void Home::PaintMenu(QPainter& p, const QRect& area) {
-    // A menu over everything, in the centre.
+    // A menu over everything, in the centre: a card that comes in, a title with its mark, and a
+    // highlight that glides between the entries.
     menu_rects.clear();
     menu_box = {};
     if (menu.empty()) {
         return;
     }
     const bool dark = Dark();
-    const QColor panel = dark ? QColor(0x3A, 0x3A, 0x3F) : QColor(0xFF, 0xFF, 0xFF);
+    const QColor panel = dark ? QColor(0x30, 0x30, 0x35) : QColor(0xFB, 0xFB, 0xFC);
     const QColor text = dark ? QColor(0xF2, 0xF2, 0xF2) : QColor(0x2B, 0x2B, 0x2E);
+    const QColor sub = dark ? QColor(0xA0, 0xA0, 0xA8) : QColor(0x6A, 0x6A, 0x72);
     const QColor accent = Accent();
     const double s =
         std::max(0.45, std::min(area.width() / 1920.0, area.height() / 1080.0)) * 1.1;
     const int w = area.width();
     const int h = area.height();
+    const double show = EaseOut(menu_show);
+    p.save();
     p.setRenderHint(QPainter::Antialiasing);
     p.setRenderHint(QPainter::TextAntialiasing);
-    p.fillRect(area, QColor(0, 0, 0, 170));
+    p.fillRect(area, QColor(0, 0, 0, static_cast<int>(165 * show)));
+
     const double menu_w = std::min(MenuWidth * s, w - 32.0);
-    const double pad = 28 * s;
+    const double pad = 26 * s;
+    const double row_gap = 6 * s;
     const QFont item_font = Font(font(), MenuFont * s);
-    const QFont title_font = Font(font(), MenuFont * 1.3 * s, QFont::Medium);
-    const double item_h = QFontMetricsF(item_font).height() + MenuFont * s;
-    const double title_box_h =
-        QFontMetricsF(title_font)
-            .boundingRect(QRectF(0, 0, menu_w - 2 * pad - 16 * s, 10000), Qt::TextWordWrap,
-                          menu_title)
-            .height() +
-        16 * s;
-    const int fit = std::max(
-        1, static_cast<int>((h - 220 * s - title_box_h - 2 * pad) / (item_h + 4 * s)));
+    const QFont title_font = Font(font(), MenuFont * 1.25 * s, QFont::DemiBold);
+    const double item_h = QFontMetricsF(item_font).height() + MenuFont * 1.25 * s;
+    const double title_w = menu_w - 2 * pad - 22 * s;
+    const double title_h = QFontMetricsF(title_font)
+                               .boundingRect(QRectF(0, 0, title_w, 10000), Qt::TextWordWrap,
+                                             menu_title)
+                               .height();
+    const double header_h = title_h + 34 * s; // the title, the line under it and air
+    const int fit =
+        std::max(1, static_cast<int>((h - 260 * s - header_h - 2 * pad) / (item_h + row_gap)));
     const int count = static_cast<int>(menu.size());
     const int visible = std::min(count, fit);
     const int first = std::clamp(menu_index - visible / 2, 0, count - visible);
-    const double box_h = 2 * pad + title_box_h + visible * (item_h + 4 * s);
-    menu_box = QRectF((w - menu_w) / 2, (h - box_h) / 2, menu_w, box_h).toAlignedRect();
+    const double box_h = 2 * pad + header_h + visible * (item_h + row_gap) - row_gap;
+    const QRectF box((w - menu_w) / 2, (h - box_h) / 2, menu_w, box_h);
+    menu_box = box.toAlignedRect();
+
+    // The card grows into place.
+    p.setOpacity(show);
+    p.translate(box.center().x(), box.center().y() + (1 - show) * 18 * s);
+    p.scale(0.94 + 0.06 * show, 0.94 + 0.06 * show);
+    p.translate(-box.center().x(), -box.center().y());
+
     p.setPen(Qt::NoPen);
+    for (int layer = 8; layer >= 1; --layer) {
+        const double spread = layer * 4 * s;
+        p.setBrush(QColor(0, 0, 0, 9));
+        p.drawRoundedRect(box.adjusted(-spread, -spread + 6 * s, spread, spread + 10 * s),
+                          16 * s + spread, 16 * s + spread);
+    }
     p.setBrush(panel);
-    p.drawRoundedRect(menu_box, 8 * s, 8 * s);
+    p.setPen(QPen(dark ? QColor(255, 255, 255, 26) : QColor(0, 0, 0, 22), 1));
+    p.drawRoundedRect(box, 16 * s, 16 * s);
+
+    // Title: a mark in the accent colour, the text, a thin line.
+    const QRectF title_rect(box.left() + pad + 22 * s, box.top() + pad, title_w, title_h);
+    p.setPen(Qt::NoPen);
+    const QRectF mark(box.left() + pad + 2 * s, title_rect.top() + 3 * s, 6 * s,
+                      title_h - 6 * s);
+    p.setBrush(AccentBrush(mark.adjusted(-40 * s, 0, 40 * s, 0)));
+    p.drawRoundedRect(mark, 3 * s, 3 * s);
     p.setPen(text);
     p.setFont(title_font);
-    p.drawText(QRectF(menu_box.left() + pad + 8 * s, menu_box.top() + pad,
-                      menu_w - 2 * pad - 16 * s, title_box_h),
-               Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, menu_title);
+    p.drawText(title_rect, Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, menu_title);
+    QColor line = sub;
+    line.setAlpha(60);
+    p.setPen(QPen(line, 1));
+    const double line_y = title_rect.bottom() + 17 * s;
+    p.drawLine(QPointF(box.left() + pad, line_y), QPointF(box.right() - pad, line_y));
+
+    const double items_top = box.top() + pad + header_h;
+    const auto item_rect = [&](double position) {
+        return QRectF(box.left() + pad, items_top + position * (item_h + row_gap),
+                      menu_w - 2 * pad, item_h);
+    };
+
+    // The highlight, where the selection is gliding to.
+    p.save();
+    p.setClipRect(QRectF(box.left(), items_top - 6 * s, menu_w,
+                         visible * (item_h + row_gap) + 6 * s));
+    const QRectF glow = item_rect(menu_cursor - first);
+    QColor halo = accent;
+    halo.setAlpha(55);
+    p.setPen(Qt::NoPen);
+    p.setBrush(halo);
+    p.drawRoundedRect(glow.adjusted(-4 * s, -4 * s, 4 * s, 4 * s), 14 * s, 14 * s);
+    QLinearGradient fill(glow.topLeft(), glow.topRight());
+    fill.setColorAt(0, accent);
+    fill.setColorAt(1, Rainbow() ? Hsv(accent.hsvHueF() * 360 + 55, 0.62, 1.0)
+                                 : accent.lighter(118));
+    p.setBrush(fill);
+    p.drawRoundedRect(glow, 10 * s, 10 * s);
+    p.restore();
+
     menu_rects.assign(menu.size(), QRect());
     p.setFont(item_font);
+    const QFontMetricsF metrics(item_font);
+    // On a light highlight (yellow, the rainbow passing through green) the text goes dark.
+    const double light =
+        (0.299 * accent.redF() + 0.587 * accent.greenF() + 0.114 * accent.blueF());
+    const QColor on_text = light > 0.62 ? QColor(0x1E, 0x1E, 0x22) : QColor(Qt::white);
     for (int i = first; i < first + visible; ++i) {
-        const QRectF item(menu_box.left() + pad,
-                          menu_box.top() + pad + title_box_h + (i - first) * (item_h + 4 * s) +
-                              2 * s,
-                          menu_w - 2 * pad, item_h);
+        const QRectF item = item_rect(i - first);
         menu_rects[i] = item.toAlignedRect();
         const bool on = i == menu_index;
-        if (on) {
-            p.setPen(Qt::NoPen);
-            p.setBrush(accent);
-            p.drawRoundedRect(item, 4 * s, 4 * s);
+        const QRectF inner = item.adjusted(18 * s, 0, -18 * s, 0);
+        QString label = menu[i].label();
+        QString value;
+        // "Tema: Oscuro" is a setting: its value goes to the right, with arrows when selected.
+        if (const int colon = label.indexOf(QStringLiteral(": ")); menu[i].adjust && colon > 0) {
+            value = label.mid(colon + 2);
+            label = label.left(colon);
         }
-        p.setPen(on ? QColor(Qt::white) : text);
-        p.drawText(item.adjusted(14 * s, 0, -14 * s, 0), Qt::AlignVCenter | Qt::AlignLeft,
-                   p.fontMetrics().elidedText(menu[i].label(), Qt::ElideRight,
-                                              static_cast<int>(item.width() - 28 * s)));
+        double value_w = 0;
+        if (!value.isEmpty()) {
+            const QString shown =
+                on ? QString(QStringLiteral("‹  ") + value + QStringLiteral("  ›")) : value;
+            value_w = std::min(metrics.horizontalAdvance(shown), inner.width() * 0.6);
+            p.setPen(on ? on_text : sub);
+            p.drawText(QRectF(inner.right() - value_w, inner.top(), value_w, inner.height()),
+                       Qt::AlignVCenter | Qt::AlignRight,
+                       metrics.elidedText(shown, Qt::ElideRight, value_w));
+            value_w += 16 * s;
+        }
+        p.setPen(on ? on_text : text);
+        p.drawText(QRectF(inner.left(), inner.top(), inner.width() - value_w, inner.height()),
+                   Qt::AlignVCenter | Qt::AlignLeft,
+                   metrics.elidedText(label, Qt::ElideRight, inner.width() - value_w));
     }
+
+    // More entries than fit: a small bar says where we are.
+    if (visible < count) {
+        const double track_h = visible * (item_h + row_gap) - row_gap;
+        const double thumb_h = track_h * visible / count;
+        p.setPen(Qt::NoPen);
+        p.setBrush(line);
+        p.drawRoundedRect(QRectF(box.right() - pad / 2 - 2 * s,
+                                 items_top + (track_h - thumb_h) * first / (count - visible),
+                                 4 * s, thumb_h),
+                          2 * s, 2 * s);
+    }
+
+    // Under the card: what the buttons do here.
+    QString hint = QStringLiteral("Enter / ✕  Aceptar        Esc / ○  Volver");
+    if (menu[menu_index].adjust) {
+        hint = QStringLiteral("◀ ▶  Cambiar        ") + hint;
+    }
+    p.setPen(QColor(255, 255, 255, 170));
+    p.setFont(Font(font(), HintSize * 0.72 * s));
+    p.drawText(QRectF(box.left(), box.bottom() + 18 * s, menu_w, 30 * s), Qt::AlignCenter, hint);
+    p.restore();
 }
 
 // ---- input
