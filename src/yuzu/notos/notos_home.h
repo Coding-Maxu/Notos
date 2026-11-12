@@ -159,6 +159,7 @@ private:
     void SetSetting(const QString& key, const QJsonValue& value);
     QColor Accent() const;
     bool Rainbow() const; ///< the accent is the slowly moving rainbow
+    QString PadName() const; ///< the connected gamepad, or empty for keyboard and mouse
     /// What marks the selection: the accent, or the rainbow turning around `rect`.
     QBrush AccentBrush(const QRectF& rect) const;
     bool Dark() const;
@@ -213,6 +214,7 @@ private:
     int button_index = 0;
     double scroll = 0;
     bool list_mode = false;
+    QString pad_name; ///< shown next to the clock
 
     // Animation: the covers glide to where the selection wants them, the selected one grows, and
     // the opening sequence plays once.

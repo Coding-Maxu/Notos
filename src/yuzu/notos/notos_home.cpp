@@ -44,6 +44,8 @@
 #include <QTime>
 #include <QTimer>
 
+#include <SDL3/SDL.h>
+
 #include "common/fs/path_util.h"
 #include "hid_core/frontend/emulated_controller.h"
 #include "qt_common/game_list/game_list_p.h"
@@ -296,10 +298,12 @@ Home::Home(QMainWindow* window_, QBoxLayout* central, QWidget* game_list_, QWidg
     clock_timer = new QTimer(this);
     clock_timer->setInterval(1000);
     connect(clock_timer, &QTimer::timeout, this, [this] {
+        pad_name = PadName();
         if (isVisible()) {
             update();
         }
     });
+    pad_name = PadName();
     clock_timer->start();
 
     pad_timer = new QTimer(this);
@@ -423,6 +427,24 @@ void Home::SetSetting(const QString& key, const QJsonValue& value) {
     config.insert(QStringLiteral("settings"), settings);
     SaveConfig();
     update();
+}
+
+QString Home::PadName() const {
+    // The emulator's input already started SDL's gamepad support; its first gamepad is named
+    // like the launcher showed it ("DualSense Wireless Controller", "Xbox Series X Controller").
+    if (!SDL_WasInit(SDL_INIT_GAMEPAD)) {
+        return {};
+    }
+    int count = 0;
+    SDL_JoystickID* pads = SDL_GetGamepads(&count);
+    QString name;
+    if (pads && count > 0) {
+        if (const char* raw = SDL_GetGamepadNameForID(pads[0])) {
+            name = QString::fromUtf8(raw);
+        }
+    }
+    SDL_free(pads);
+    return name;
 }
 
 bool Home::Rainbow() const {
@@ -1394,11 +1416,34 @@ void Home::paintEvent(QPaintEvent*) {
     p.setOpacity(ui);
     const bool clock24 = Prefs().value(QStringLiteral("clock24")).toBool();
     p.setPen(text);
-    p.setFont(Font(font(), ClockSize * s));
-    p.drawText(QRectF(w / 2.0, badge_rect.top() - 20 * s, w / 2.0 - 48 * s, badge + 40 * s),
-               Qt::AlignVCenter | Qt::AlignRight,
-               QTime::currentTime().toString(clock24 ? QStringLiteral("HH:mm")
-                                                     : QStringLiteral("h:mm AP")));
+    const QFont clock_font = Font(font(), ClockSize * s);
+    p.setFont(clock_font);
+    const QString clock = QTime::currentTime().toString(clock24 ? QStringLiteral("HH:mm")
+                                                                : QStringLiteral("h:mm AP"));
+    const QRectF clock_rect(w / 2.0, badge_rect.top() - 20 * s, w / 2.0 - 48 * s, badge + 40 * s);
+    p.drawText(clock_rect, Qt::AlignVCenter | Qt::AlignRight, clock);
+
+    // Left of the clock: the controller in use, as the launcher showed it.
+    {
+        const double clock_w = QFontMetricsF(clock_font).horizontalAdvance(clock);
+        const double right = clock_rect.right() - clock_w - 28 * s;
+        const QFont pad_font = Font(font(), ClockSize * 0.75 * s);
+        const QString pad_text = pad_name.isEmpty() ? QStringLiteral("Teclado y ratón") : pad_name;
+        const double text_w = std::min(QFontMetricsF(pad_font).horizontalAdvance(pad_text),
+                                       w * 0.35);
+        p.setPen(sub);
+        p.setFont(pad_font);
+        p.drawText(QRectF(right - text_w, clock_rect.top(), text_w, clock_rect.height()),
+                   Qt::AlignVCenter | Qt::AlignRight,
+                   QFontMetricsF(pad_font).elidedText(pad_text, Qt::ElideRight, text_w));
+        const int glyph = static_cast<int>(ClockSize * s);
+        const QPixmap pad_icon =
+            FritchiiUi::Glyph(QStringLiteral("gamepad"), sub.rgb() & 0xFFFFFF, glyph)
+                .pixmap(glyph, glyph);
+        p.drawPixmap(QRectF(right - text_w - 10 * s - glyph, clock_rect.center().y() - glyph / 2.0,
+                            glyph, glyph),
+                     pad_icon, QRectF(pad_icon.rect()));
+    }
 
     // Centre: the selected game's title over the covers.
     const double tile = Tile * s;
@@ -2225,8 +2270,6 @@ void Home::SettingsMenu() {
                   [this] { hooks.open_settings(); }, {}, true},
             Entry{[] { return QStringLiteral("Partidas guardadas"); },
                   [this] { hooks.open_saves(); }, {}, true},
-            Entry{[] { return QStringLiteral("Lista clásica de juegos"); },
-                  [this] { ShowList(); }, {}, true},
         });
 }
 
