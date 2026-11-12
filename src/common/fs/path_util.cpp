@@ -134,6 +134,7 @@ public:
         LEGACY_PATH(Suyu, SUYU)
         LEGACY_PATH(LegacyEden, EDEN_LEGACY)
         LEGACY_PATH(Lichii, LICHII)
+        LEGACY_PATH(Fritchii, FRITCHII)
 #undef LEGACY_PATH
 #elif __ANDROID__
         portable = true;
@@ -160,6 +161,7 @@ public:
         LEGACY_PATH(Suyu, SUYU)
         LEGACY_PATH(LegacyEden, EDEN_LEGACY)
         LEGACY_PATH(Lichii, LICHII)
+        LEGACY_PATH(Fritchii, FRITCHII)
 #undef LEGACY_PATH
 #endif
         // data

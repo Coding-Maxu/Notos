@@ -41,7 +41,8 @@ bool NeedsLegacyProfileImport() {
     if (state != Migration::State::Unresolved) {
         return false;
     }
-    constexpr std::array sources{LegacyEdenDir, LichiiDir, CitronDir, SudachiDir, SuyuDir, YuzuDir};
+    constexpr std::array sources{FritchiiDir, LegacyEdenDir, LichiiDir, CitronDir,
+                                 SudachiDir,  SuyuDir,       YuzuDir};
     for (const auto source : sources) {
         if (fs::is_directory(GetLegacyPath(source))) {
             return true;
@@ -83,7 +84,8 @@ std::string TakeProfileImportRequest() {
     fs::remove(request, ec);
     // The first line names the folder; v5.8.2 adds what to copy on the next lines.
     const std::string folder = text.substr(0, text.find('\n'));
-    constexpr std::array known{"eden", "lichii", "yuzu", "suyu", "sudachi", "citron"};
+    constexpr std::array known{"fritchii", "eden",    "lichii", "yuzu",
+                               "suyu",     "sudachi", "citron"};
     if (std::ranges::find(known, folder) == known.end()) {
         return {};
     }

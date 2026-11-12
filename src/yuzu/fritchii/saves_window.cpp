@@ -53,9 +53,9 @@ fs::path SaveRoot(const fs::path& nand) {
 std::vector<Place> Places() {
     using namespace Common::FS;
     std::vector<Place> places{
-        {QStringLiteral("Fritchii"), SaveRoot(GetEdenPath(EdenPath::NANDDir))}};
-    constexpr std::array<std::pair<EmuPath, const char*>, 2> others{
-        {{LegacyEdenDir, "Eden"}, {LichiiDir, "Lichii"}}};
+        {QStringLiteral("Notos"), SaveRoot(GetEdenPath(EdenPath::NANDDir))}};
+    constexpr std::array<std::pair<EmuPath, const char*>, 3> others{
+        {{FritchiiDir, "Fritchii"}, {LegacyEdenDir, "Eden"}, {LichiiDir, "Lichii"}}};
     for (const auto& [path, name] : others) {
         if (fs::is_directory(GetLegacyPath(path) / NAND_DIR)) {
             places.push_back({QString::fromLatin1(name), SaveRoot(GetLegacyPath(path) / NAND_DIR)});
@@ -337,7 +337,7 @@ void ShowSavesWindow(QWidget* parent, const std::function<bool()>& emulation_run
         QString question = QObject::tr("Copy the saves from %1 to %2? The games' saves in %2 "
                                        "are replaced.")
                                .arg(source.name, target.name);
-        if (target.name != QStringLiteral("Fritchii")) {
+        if (target.name != QStringLiteral("Notos")) {
             question += QObject::tr(" Close %1 first.").arg(target.name);
         }
         const auto backup_path = BackupPath(target.root);

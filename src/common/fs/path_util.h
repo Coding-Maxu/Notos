@@ -66,6 +66,10 @@ enum EmuPath {
 
     // used exclusively for save data linking
     RyujinxDir,
+
+    FritchiiDir,
+    FritchiiConfigDir,
+    FritchiiCacheDir,
 };
 
 /**
