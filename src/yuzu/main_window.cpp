@@ -5649,7 +5649,7 @@ void MainWindow::OnCheckGraphicsBackend() {
         UISettings::values.gui_force_x11.SetValue(true);
         GraphicsBackend::SetForceX11(true);
         QMessageBox::information(this, tr("Restart Required"),
-                                 tr("Restart Lichii to apply the X11 backend."));
+                                 tr("Restart Notos to apply the X11 backend."));
     }
 }
 #endif
@@ -5774,8 +5774,8 @@ bool MainWindow::ConfirmClose() {
         UISettings::values.confirm_before_stopping.GetValue() == ConfirmStop::Ask_Based_On_Game)
         return true;
 
-    const auto text = tr("Are you sure you want to close Lichii?");
-    return question(this, tr("Lichii"), text);
+    const auto text = tr("Are you sure you want to close Notos?");
+    return question(this, tr("Notos"), text);
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
@@ -5881,7 +5881,7 @@ bool MainWindow::ConfirmChangeGame() {
 
     // Use custom question to link controller navigation
     return question(
-        this, tr("Lichii"),
+        this, tr("Notos"),
         tr("Are you sure you want to stop the emulation? Any unsaved progress will be lost."),
         QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
 }
@@ -5890,10 +5890,10 @@ bool MainWindow::ConfirmForceLockedExit() {
     if (QtCommon::emu_thread == nullptr)
         return true;
 
-    const auto text = tr("The currently running application has requested Lichii to not exit.\n\n"
+    const auto text = tr("The currently running application has requested Notos to not exit.\n\n"
                          "Would you like to bypass this and exit anyway?");
 
-    return question(this, tr("Lichii"), text);
+    return question(this, tr("Notos"), text);
 }
 
 void MainWindow::RequestGameExit() {

@@ -868,7 +868,7 @@ bool GRenderWindow::InitializeOpenGL() {
     return true;
 #else
     QMessageBox::warning(this, tr("OpenGL not available!"),
-                         tr("Lichii has not been compiled with OpenGL support."));
+                         tr("Notos has not been compiled with OpenGL support."));
     return false;
 #endif
 }

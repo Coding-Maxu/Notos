@@ -143,11 +143,29 @@ void MainWindow::SetUpFritchiiUi() {
                                         : nullptr;
             },
         .model = game_list->GetModel(),
+        .render = [this] { return static_cast<QWidget*>(render_window); },
+        .game_running = [] { return QtCommon::emu_thread && QtCommon::emu_thread->IsRunning(); },
+        .pause = [this] { OnPauseGame(); },
+        .resume = [this] { OnStartGame(); },
+        .stop =
+            [this] {
+                // OnStopGame without its question: the Home menu asked already.
+                play_time_manager->Stop();
+                if (OnShutdownBegin()) {
+                    OnShutdownBeginDialog();
+                } else {
+                    OnEmulationStopped();
+                }
+            },
+        .game_config = [this] { ui->action_Configure_Current_Game->trigger(); },
+        .toggle_fullscreen = [this] { ui->action_Fullscreen->trigger(); },
+        .fullscreen = [this] { return ui->action_Fullscreen->isChecked(); },
     };
     // Notos: the launcher-style home screen in place of Fritchii's (FritchiiUi::Home).
     auto* notos_home = new Notos::Home(this, ui->horizontalLayout, game_list,
                                        game_list_placeholder, std::move(home));
     connect(this, &MainWindow::EmulationStarting, notos_home, &Notos::Home::OnEmulationStarting);
+    connect(this, &MainWindow::EmulationStopping, notos_home, &Notos::Home::OnEmulationStopping);
 
     // In-game controls: the menu bar is gone and the rail steps aside while a game runs.
     auto* controls = new FritchiiUi::GameControls(

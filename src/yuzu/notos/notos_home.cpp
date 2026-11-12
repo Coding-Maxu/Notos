@@ -35,6 +35,7 @@
 #include <QMenuBar>
 #include <QPainter>
 #include <QPainterPath>
+#include <QShortcut>
 #include <QStandardItemModel>
 #include <QStatusBar>
 #include <QTime>
@@ -164,6 +165,8 @@ Home::Home(QMainWindow* window_, QBoxLayout* central, QWidget* game_list_, QWidg
     // list shows them, with "Inicio" to come back.
     home_action = window->menuBar()->addAction(QStringLiteral("◀ Inicio"));
     connect(home_action, &QAction::triggered, this, &Home::ShowHome);
+    window->menuBar()->setFixedHeight(0); // also when Notos starts straight into a game
+    home_action->setVisible(false);
 
     game_list->installEventFilter(this);
     placeholder->installEventFilter(this);
@@ -193,6 +196,19 @@ Home::Home(QMainWindow* window_, QBoxLayout* central, QWidget* game_list_, QWidg
     pad_timer->setInterval(16);
     connect(pad_timer, &QTimer::timeout, this, &Home::PollPad);
     pad_timer->start();
+
+    overlay = new Overlay(this);
+    overlay_timer = new QTimer(this);
+    overlay_timer->setInterval(33);
+    connect(overlay_timer, &QTimer::timeout, this, [this] {
+        if (overlay->isVisible()) {
+            PlaceOverlay(); // follows fullscreen changes and window moves
+            overlay->update();
+        }
+    });
+    // The keyboard's Home key opens the Home menu too.
+    auto* home_key = new QShortcut(QKeySequence(Qt::Key_Home), window);
+    connect(home_key, &QShortcut::activated, this, &Home::ToggleGameMenu);
 
     native_timer = new QTimer(this);
     native_timer->setInterval(500);
@@ -401,6 +417,166 @@ void Home::OnEmulationStarting() {
     window->statusBar()->setVisible(status_was_visible);
 }
 
+void Home::OnEmulationStopping() {
+    if (overlay->isVisible()) {
+        LeaveGameMenu(false);
+    }
+    home_down = false;
+}
+
+// ---- the Home menu over a running game
+
+namespace {
+constexpr Qt::WindowFlags OverlayFlags =
+    Qt::Tool | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint;
+}
+
+Overlay::Overlay(Home* home_) : QWidget(home_->window, OverlayFlags), home{home_} {
+    setAttribute(Qt::WA_TranslucentBackground);
+    setFocusPolicy(Qt::StrongFocus);
+}
+
+void Overlay::paintEvent(QPaintEvent*) {
+    QPainter p(this);
+    home->PaintMenu(p, rect());
+}
+
+void Overlay::keyPressEvent(QKeyEvent* event) {
+    if (event->key() == Qt::Key_Home) {
+        home->ToggleGameMenu();
+        return;
+    }
+    const QString cmd = home->KeyCommand(event->key());
+    if (cmd.isEmpty() || cmd == QStringLiteral("fullscreen")) {
+        QWidget::keyPressEvent(event);
+        return;
+    }
+    home->Nav(cmd);
+    update();
+}
+
+void Overlay::mousePressEvent(QMouseEvent* event) {
+    home->MenuMouse(event->position().toPoint(), event->button());
+    update();
+}
+
+void Home::PlaceOverlay() {
+    QWidget* render = hooks.render ? hooks.render() : nullptr;
+    // A separate game window (single window mode off) owns the menu, so it stays above it.
+    QWidget* owner = render && render->isVisible() ? render->window() : window;
+    if (overlay->parentWidget() != owner) {
+        const bool shown = overlay->isVisible();
+        overlay->setParent(owner, OverlayFlags);
+        if (shown) {
+            overlay->show();
+        }
+    }
+    const QRect area = render && render->isVisible()
+                           ? QRect(render->mapToGlobal(QPoint(0, 0)), render->size())
+                           : window->frameGeometry();
+    if (overlay->geometry() != area) {
+        overlay->setGeometry(area);
+    }
+}
+
+void Home::LeaveGameMenu(bool resume) {
+    menu.clear();
+    overlay_timer->stop();
+    overlay->hide();
+    qApp->removeEventFilter(this);
+    if (resume && paused_by_menu && hooks.emulation_running()) {
+        hooks.resume();
+    }
+    paused_by_menu = false;
+    if (QWidget* render = hooks.render ? hooks.render() : nullptr) {
+        render->activateWindow();
+        render->setFocus();
+    }
+}
+
+void Home::ToggleGameMenu() {
+    if (overlay->isVisible()) {
+        LeaveGameMenu(true);
+        return;
+    }
+    if (!hooks.emulation_running() || QApplication::activeModalWidget()) {
+        return;
+    }
+    paused_by_menu = hooks.game_running && hooks.game_running();
+    if (paused_by_menu) {
+        hooks.pause();
+    }
+    GameMenuEntries();
+    PlaceOverlay();
+    overlay->show();
+    overlay->raise();
+    overlay->activateWindow();
+    overlay->setFocus();
+    overlay_timer->start();
+    // Windows may keep the keyboard on the game's window: every key comes to the menu while it
+    // shows (and none reaches the paused game or the main window's shortcuts).
+    qApp->installEventFilter(this);
+}
+
+void Home::GameMenuEntries() {
+    // A settings dialog shows over the paused game; the game goes on once it closes.
+    const auto dialog = [this](std::function<void()> open) {
+        return [this, open] {
+            const bool resume = paused_by_menu;
+            menu.clear();
+            overlay_timer->stop();
+            overlay->hide();
+            paused_by_menu = false;
+            if (open) {
+                open();
+            }
+            if (resume && hooks.emulation_running()) {
+                hooks.resume();
+            }
+        };
+    };
+    std::vector<Entry> entries{
+        Entry{[] { return QStringLiteral("Volver al juego"); }, [this] { LeaveGameMenu(true); },
+              {}, false},
+        Entry{[] { return QStringLiteral("Ajustes del emulador"); }, dialog(hooks.open_settings),
+              {}, false},
+        Entry{[] { return QStringLiteral("Ajustes de este juego"); }, dialog(hooks.game_config),
+              {}, false},
+        Entry{[this] {
+                  return QStringLiteral("Pantalla completa: ") +
+                         (hooks.fullscreen && hooks.fullscreen() ? QStringLiteral("Sí")
+                                                                 : QStringLiteral("No"));
+              },
+              {},
+              [this](int) {
+                  if (hooks.toggle_fullscreen) {
+                      hooks.toggle_fullscreen();
+                  }
+              },
+              false},
+        Entry{[] { return QStringLiteral("Cerrar juego"); },
+              [this] {
+                  // Asked here rather than in the emulator's own dialog, so the gamepad answers.
+                  OpenMenu(QStringLiteral("¿Cerrar el juego? Lo que no hayas guardado se pierde."),
+                           {Entry{[] { return QStringLiteral("No"); },
+                                  [this] { GameMenuEntries(); }, {}, false},
+                            Entry{[] { return QStringLiteral("Sí, cerrar"); },
+                                  [this] {
+                                      LeaveGameMenu(false);
+                                      hooks.stop();
+                                  },
+                                  {}, false}});
+              },
+              {}, false},
+    };
+    // The game's name from the window title ("Notos | version | compiler | game | ...").
+    const QStringList parts = window->windowTitle().split(QStringLiteral(" | "));
+    menu_title = parts.size() > 3 ? parts[3] : QStringLiteral("Notos");
+    menu = std::move(entries);
+    menu_index = 0;
+    update();
+}
+
 void Home::ApplyFullscreen() {
     if (Prefs().value(QStringLiteral("fullscreen")).toBool()) {
         window->showFullScreen();
@@ -410,6 +586,29 @@ void Home::ApplyFullscreen() {
 }
 
 bool Home::eventFilter(QObject* watched, QEvent* event) {
+    if (overlay && overlay->isVisible() && !QApplication::activeModalWidget() &&
+        (event->type() == QEvent::KeyPress || event->type() == QEvent::ShortcutOverride ||
+         event->type() == QEvent::KeyRelease)) {
+        if (event->type() == QEvent::ShortcutOverride) {
+            event->accept(); // the key goes on as a key press, to here
+            return true;
+        }
+        if (event->type() == QEvent::KeyPress) {
+            const auto* key = static_cast<QKeyEvent*>(event);
+            if (key->key() == Qt::Key_Home) {
+                if (!key->isAutoRepeat()) {
+                    ToggleGameMenu();
+                }
+            } else if (const QString cmd = KeyCommand(key->key());
+                       !cmd.isEmpty() && cmd != QStringLiteral("fullscreen")) {
+                Nav(cmd);
+                if (overlay->isVisible()) {
+                    overlay->update();
+                }
+            }
+        }
+        return true;
+    }
     if (event->type() == QEvent::Show && (watched == game_list || watched == placeholder)) {
         QTimer::singleShot(0, this, &Home::Restore);
     }
@@ -600,13 +799,27 @@ void Home::paintEvent(QPaintEvent*) {
     p.drawText(QRectF(36 * s, bar_y, w - 88 * s, BottomBar * s), Qt::AlignVCenter | Qt::AlignRight,
                hint);
 
+    PaintMenu(p, rect());
+}
+
+void Home::PaintMenu(QPainter& p, const QRect& area) {
     // A menu over everything, in the centre.
     menu_rects.clear();
     menu_box = {};
     if (menu.empty()) {
         return;
     }
-    p.fillRect(rect(), QColor(0, 0, 0, 170));
+    const bool dark = Dark();
+    const QColor panel = dark ? QColor(0x3A, 0x3A, 0x3F) : QColor(0xFF, 0xFF, 0xFF);
+    const QColor text = dark ? QColor(0xF2, 0xF2, 0xF2) : QColor(0x2B, 0x2B, 0x2E);
+    const QColor accent = Accent();
+    const double s =
+        std::max(0.45, std::min(area.width() / 1920.0, area.height() / 1080.0)) * 1.1;
+    const int w = area.width();
+    const int h = area.height();
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setRenderHint(QPainter::TextAntialiasing);
+    p.fillRect(area, QColor(0, 0, 0, 170));
     const double menu_w = std::min(MenuWidth * s, w - 32.0);
     const double pad = 28 * s;
     const QFont item_font = Font(font(), MenuFont * s);
@@ -679,38 +892,36 @@ bool Home::event(QEvent* event) {
     return QWidget::event(event);
 }
 
-void Home::keyPressEvent(QKeyEvent* event) {
-    QString cmd;
-    switch (event->key()) {
+QString Home::KeyCommand(int key) const {
+    switch (key) {
     case Qt::Key_Left:
-        cmd = QStringLiteral("left");
-        break;
+        return QStringLiteral("left");
     case Qt::Key_Right:
-        cmd = QStringLiteral("right");
-        break;
+        return QStringLiteral("right");
     case Qt::Key_Up:
-        cmd = QStringLiteral("up");
-        break;
+        return QStringLiteral("up");
     case Qt::Key_Down:
-        cmd = QStringLiteral("down");
-        break;
+        return QStringLiteral("down");
     case Qt::Key_Return:
     case Qt::Key_Enter:
     case Qt::Key_Space:
-        cmd = QStringLiteral("accept");
-        break;
+        return QStringLiteral("accept");
     case Qt::Key_Escape:
     case Qt::Key_Backspace:
-        cmd = QStringLiteral("back");
-        break;
+        return QStringLiteral("back");
     case Qt::Key_Tab:
     case Qt::Key_Menu:
-        cmd = QStringLiteral("options");
-        break;
+        return QStringLiteral("options");
     case Qt::Key_F11:
-        cmd = QStringLiteral("fullscreen");
-        break;
+        return QStringLiteral("fullscreen");
     default:
+        return {};
+    }
+}
+
+void Home::keyPressEvent(QKeyEvent* event) {
+    const QString cmd = KeyCommand(event->key());
+    if (cmd.isEmpty()) {
         QWidget::keyPressEvent(event);
         return;
     }
@@ -805,30 +1016,34 @@ void Home::Select() {
     update();
 }
 
+void Home::MenuMouse(const QPoint& pos, Qt::MouseButton button) {
+    for (int i = 0; i < static_cast<int>(menu_rects.size()); ++i) {
+        if (!menu_rects[i].contains(pos)) {
+            continue;
+        }
+        menu_index = i;
+        if (button == Qt::RightButton) {
+            if (menu[i].adjust) {
+                menu[i].adjust(-1);
+            }
+        } else if (menu[i].adjust && !menu[i].act) {
+            menu[i].adjust(1);
+        } else {
+            RunEntry(i);
+            return;
+        }
+        update();
+        return;
+    }
+    if (!menu_box.contains(pos)) {
+        CloseMenu();
+    }
+}
+
 void Home::mousePressEvent(QMouseEvent* event) {
     const QPoint pos = event->position().toPoint();
     if (!menu.empty()) {
-        for (int i = 0; i < static_cast<int>(menu_rects.size()); ++i) {
-            if (!menu_rects[i].contains(pos)) {
-                continue;
-            }
-            menu_index = i;
-            if (event->button() == Qt::RightButton) {
-                if (menu[i].adjust) {
-                    menu[i].adjust(-1);
-                }
-            } else if (menu[i].adjust && !menu[i].act) {
-                menu[i].adjust(1);
-            } else {
-                RunEntry(i);
-                return;
-            }
-            update();
-            return;
-        }
-        if (!menu_box.contains(pos)) {
-            CloseMenu();
-        }
+        MenuMouse(pos, event->button());
         return;
     }
     for (int i = 0; i < static_cast<int>(tile_rects.size()); ++i) {
@@ -890,10 +1105,27 @@ void Home::PollPad() {
         return;
     }
     const u64 buttons = static_cast<u64>(controller->GetNpadButtons().raw);
-    const bool listening = isVisible() && window->isActiveWindow() &&
-                           !QApplication::activeModalWidget() && !QApplication::activePopupWidget();
     const u64 pressed = buttons & ~pad_held;
     pad_held = buttons;
+
+    // Home pressed and let go on its own opens or closes the Home menu during a game; Home with
+    // another button is one of the emulator's hotkeys (Home+B fullscreen...) and does not.
+    const bool home = controller->GetHomeButtons().home.Value() != 0;
+    if (home && !home_down) {
+        home_down = true;
+        home_combo = false;
+    } else if (home && pressed != 0) {
+        home_combo = true;
+    } else if (!home && home_down) {
+        home_down = false;
+        if (!home_combo && hooks.emulation_running() && !QApplication::activeModalWidget()) {
+            ToggleGameMenu();
+            return;
+        }
+    }
+
+    const bool listening = ((isVisible() && window->isActiveWindow()) || overlay->isVisible()) &&
+                           !QApplication::activeModalWidget() && !QApplication::activePopupWidget();
     if (!listening) {
         pad_repeat_cmd.clear();
         return;
@@ -1012,6 +1244,10 @@ void Home::OpenMenu(const QString& title, std::vector<Entry> entries) {
 }
 
 void Home::CloseMenu() {
+    if (overlay && overlay->isVisible()) {
+        LeaveGameMenu(true);
+        return;
+    }
     menu.clear();
     update();
 }

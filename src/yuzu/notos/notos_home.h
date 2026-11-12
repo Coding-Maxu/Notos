@@ -41,6 +41,34 @@ struct HomeHooks {
     std::function<bool()> emulation_running;
     std::function<Core::HID::EmulatedController*()> controller; ///< player 1, for gamepad navigation
     QStandardItemModel* model = nullptr;
+
+    // The Home menu over a running game.
+    std::function<QWidget*()> render;     ///< the game's render widget
+    std::function<bool()> game_running;   ///< running, not paused
+    std::function<void()> pause;
+    std::function<void()> resume;
+    std::function<void()> stop;           ///< close the game
+    std::function<void()> game_config;    ///< the running game's own settings
+    std::function<void()> toggle_fullscreen;
+    std::function<bool()> fullscreen;
+};
+
+class Home;
+
+/// The Home menu's window: a borderless window over the game that dims it and shows the home
+/// screen's centred menu. The game's own render surface can't have widgets drawn on it.
+class Overlay : public QWidget {
+    Q_OBJECT
+public:
+    explicit Overlay(Home* home);
+
+protected:
+    void paintEvent(QPaintEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
+
+private:
+    Home* home;
 };
 
 /// The Notos main screen, drawn like the Recomp Launcher: the title of the selected game over a
@@ -54,6 +82,23 @@ public:
 
     /// A game is starting in the main window: the render view takes the space.
     void OnEmulationStarting();
+    /// The game stopped: the Home menu goes with it.
+    void OnEmulationStopping();
+
+    /// The Home menu over the running game: opens it (pausing the game) or closes it (resuming).
+    void ToggleGameMenu();
+
+private:
+    friend class Overlay;
+    void PaintMenu(QPainter& p, const QRect& area);
+    /// A click on the open menu: an entry, or outside the menu (closes it).
+    void MenuMouse(const QPoint& pos, Qt::MouseButton button);
+    QString KeyCommand(int key) const;
+    void PlaceOverlay();
+    void LeaveGameMenu(bool resume);
+    void GameMenuEntries();
+
+public:
 
 protected:
     bool event(QEvent* event) override;
@@ -161,6 +206,13 @@ private:
 
     // The native game running (Windows process handle), or none.
     void* native_process = nullptr;
+
+    // The Home menu over a running game.
+    Overlay* overlay = nullptr;
+    QTimer* overlay_timer = nullptr;
+    bool paused_by_menu = false;
+    bool home_down = false;  ///< the gamepad's Home button is held
+    bool home_combo = false; ///< another button was pressed with it (a hotkey like Home+B)
 };
 
 } // namespace Notos
