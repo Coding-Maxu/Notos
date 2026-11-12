@@ -177,6 +177,21 @@ bool IsCloaked(HWND hwnd) {
            cloaked != 0;
 }
 
+/// Hides or shows one of Notos's own windows without changing its state (DWMWA_CLOAK).
+void SetCloaked(HWND hwnd, bool cloaked) {
+    using SetAttribute = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
+    static const auto set_attribute = [] {
+        const HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
+        return dwm ? reinterpret_cast<SetAttribute>(GetProcAddress(dwm, "DwmSetWindowAttribute"))
+                   : nullptr;
+    }();
+    constexpr DWORD Cloak = 13; // DWMWA_CLOAK
+    const BOOL value = cloaked ? TRUE : FALSE;
+    if (set_attribute) {
+        set_attribute(hwnd, Cloak, &value, sizeof(value));
+    }
+}
+
 /// The native game's main window: its largest visible top-level window.
 HWND NativeWindow(void* process) {
     if (!process) {
@@ -339,12 +354,30 @@ Home::Home(QMainWindow* window_, QBoxLayout* central, QWidget* game_list_, QWidg
     if (hooks.set_game_fullscreen) {
         hooks.set_game_fullscreen(GamesFullscreen()); // also for a game Notos starts with
     }
+    // The main window is shown after this, framed, and goes fullscreen a moment later: it stays
+    // invisible until then, so the framed window never flashes.
+    const bool start_fullscreen = Prefs().value(QStringLiteral("fullscreen")).toBool();
+#ifdef _WIN32
+    if (start_fullscreen) {
+        SetCloaked(reinterpret_cast<HWND>(window->winId()), true);
+    }
+#endif
 
-    QTimer::singleShot(0, this, [this] {
+    QTimer::singleShot(0, this, [this, start_fullscreen] {
         Restore();
         if (Prefs().value(QStringLiteral("fullscreen")).toBool()) {
             ApplyFullscreen();
         }
+#ifdef _WIN32
+        if (start_fullscreen) {
+            // Visible once Windows has drawn it at its fullscreen size.
+            QTimer::singleShot(120, this, [this] {
+                SetCloaked(reinterpret_cast<HWND>(window->winId()), false);
+            });
+        }
+#else
+        (void)start_fullscreen;
+#endif
     });
 }
 
