@@ -34,7 +34,9 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QPainter>
+#include <QGuiApplication>
 #include <QPainterPath>
+#include <QScreen>
 #include <QShortcut>
 #include <QStandardItemModel>
 #include <QStatusBar>
@@ -140,6 +142,40 @@ QPixmap LocalCover(const QString& game_path) {
     }
     return {};
 }
+
+#ifdef _WIN32
+/// The native game's main window: its largest visible top-level window.
+HWND NativeWindow(void* process) {
+    if (!process) {
+        return nullptr;
+    }
+    struct Find {
+        DWORD pid;
+        HWND best = nullptr;
+        long long area = 0;
+    } find{GetProcessId(process)};
+    EnumWindows(
+        [](HWND hwnd, LPARAM data) -> BOOL {
+            auto& f = *reinterpret_cast<Find*>(data);
+            DWORD pid = 0;
+            GetWindowThreadProcessId(hwnd, &pid);
+            if (pid != f.pid || !IsWindowVisible(hwnd) || GetWindow(hwnd, GW_OWNER)) {
+                return TRUE;
+            }
+            RECT r{};
+            GetWindowRect(hwnd, &r);
+            const long long area =
+                static_cast<long long>(r.right - r.left) * static_cast<long long>(r.bottom - r.top);
+            if (area > f.area) {
+                f.area = area;
+                f.best = hwnd;
+            }
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&find));
+    return find.best;
+}
+#endif
 
 QFont Font(const QFont& base, double px, QFont::Weight weight = QFont::Normal) {
     QFont font = base;
@@ -461,6 +497,31 @@ void Overlay::mousePressEvent(QMouseEvent* event) {
 }
 
 void Home::PlaceOverlay() {
+#ifdef _WIN32
+    if (native_menu) {
+        // Over the native game's window, on top of everything: Notos itself is minimized.
+        if (overlay->parentWidget() != nullptr) {
+            const bool shown = overlay->isVisible();
+            overlay->setParent(nullptr, OverlayFlags | Qt::WindowStaysOnTopHint);
+            if (shown) {
+                overlay->show();
+            }
+        }
+        QRect area = QGuiApplication::primaryScreen()->geometry();
+        if (HWND game_window = NativeWindow(native_process)) {
+            RECT r{};
+            GetWindowRect(game_window, &r);
+            // Windows gives physical pixels; Qt places windows in logical ones.
+            const qreal ratio = overlay->devicePixelRatioF();
+            area = QRect(QPoint(qRound(r.left / ratio), qRound(r.top / ratio)),
+                         QPoint(qRound(r.right / ratio) - 1, qRound(r.bottom / ratio) - 1));
+        }
+        if (overlay->geometry() != area) {
+            overlay->setGeometry(area);
+        }
+        return;
+    }
+#endif
     QWidget* render = hooks.render ? hooks.render() : nullptr;
     // A separate game window (single window mode off) owns the menu, so it stays above it.
     QWidget* owner = render && render->isVisible() ? render->window() : window;
@@ -484,6 +545,20 @@ void Home::LeaveGameMenu(bool resume) {
     overlay_timer->stop();
     overlay->hide();
     qApp->removeEventFilter(this);
+    if (native_menu) {
+        // A native game always runs on (closing it needs it awake to handle the request).
+        native_menu = false;
+        SuspendNative(false);
+        overlay->setParent(window, OverlayFlags);
+#ifdef _WIN32
+        if (resume) {
+            if (HWND game_window = NativeWindow(native_process)) {
+                SetForegroundWindow(game_window);
+            }
+        }
+#endif
+        return;
+    }
     if (resume && paused_by_menu && hooks.emulation_running()) {
         hooks.resume();
     }
@@ -492,6 +567,119 @@ void Home::LeaveGameMenu(bool resume) {
         render->activateWindow();
         render->setFocus();
     }
+}
+
+void Home::ToggleNativeMenu() {
+    if (overlay->isVisible()) {
+        LeaveGameMenu(true);
+        return;
+    }
+    if (!native_process) {
+        return;
+    }
+    native_menu = true;
+    NativeMenuEntries();
+    PlaceOverlay();
+    overlay->show();
+    overlay->raise();
+#ifdef _WIN32
+    // The keyboard too: Windows gives the foreground to a background program only when it joins
+    // the input of the window that has it (the game's, still running at this point).
+    const HWND foreground = GetForegroundWindow();
+    const DWORD foreground_thread = GetWindowThreadProcessId(foreground, nullptr);
+    const DWORD own_thread = GetCurrentThreadId();
+    const bool attached = foreground_thread != own_thread &&
+                          AttachThreadInput(own_thread, foreground_thread, TRUE);
+    SetForegroundWindow(reinterpret_cast<HWND>(overlay->winId()));
+    if (attached) {
+        AttachThreadInput(own_thread, foreground_thread, FALSE);
+    }
+#endif
+    overlay->activateWindow();
+    SuspendNative(true);
+    overlay_timer->start();
+    qApp->installEventFilter(this);
+}
+
+void Home::NativeMenuEntries() {
+    std::vector<Entry> entries{
+        Entry{[] { return QStringLiteral("Volver al juego"); }, [this] { LeaveGameMenu(true); },
+              {}, false},
+        Entry{[] { return QStringLiteral("Ir a Notos"); },
+              [this] {
+                  // The game goes on in the background; its cover in Notos goes back to it.
+                  LeaveGameMenu(false);
+                  ShowNotos();
+              },
+              {}, false},
+        Entry{[] { return QStringLiteral("Cerrar juego"); },
+              [this] {
+                  OpenMenu(QStringLiteral("¿Cerrar el juego? Lo que no hayas guardado se pierde."),
+                           {Entry{[] { return QStringLiteral("No"); },
+                                  [this] { NativeMenuEntries(); }, {}, false},
+                            Entry{[] { return QStringLiteral("Sí, cerrar"); },
+                                  [this] {
+                                      LeaveGameMenu(false);
+                                      CloseNative();
+                                  },
+                                  {}, false}});
+              },
+              {}, false},
+    };
+    menu_title = native_name;
+    menu = std::move(entries);
+    menu_index = 0;
+    update();
+}
+
+void Home::SuspendNative(bool suspend) {
+#ifdef _WIN32
+    if (!native_process || suspend == native_suspended) {
+        return;
+    }
+    // NtSuspendProcess / NtResumeProcess: the whole game stops while its menu shows, like an
+    // emulated one (and the gamepad's presses on the menu don't reach it).
+    using ProcessCall = LONG(NTAPI*)(HANDLE);
+    static const auto ntdll = GetModuleHandleW(L"ntdll.dll");
+    static const auto suspend_call =
+        reinterpret_cast<ProcessCall>(GetProcAddress(ntdll, "NtSuspendProcess"));
+    static const auto resume_call =
+        reinterpret_cast<ProcessCall>(GetProcAddress(ntdll, "NtResumeProcess"));
+    const ProcessCall call = suspend ? suspend_call : resume_call;
+    if (call && call(native_process) >= 0) {
+        native_suspended = suspend;
+    }
+#endif
+}
+
+void Home::CloseNative() {
+#ifdef _WIN32
+    if (!native_process) {
+        return;
+    }
+    SuspendNative(false);
+    // Ask its windows to close, as the game's own close button would; a game that is still there
+    // a few seconds later is ended.
+    struct Close {
+        DWORD pid;
+    } close{GetProcessId(native_process)};
+    EnumWindows(
+        [](HWND hwnd, LPARAM data) -> BOOL {
+            DWORD pid = 0;
+            GetWindowThreadProcessId(hwnd, &pid);
+            if (pid == reinterpret_cast<Close*>(data)->pid) {
+                PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            }
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&close));
+    HANDLE process = native_process;
+    QTimer::singleShot(5000, this, [this, process] {
+        if (native_process == process && WaitForSingleObject(process, 0) == WAIT_TIMEOUT) {
+            TerminateProcess(process, 0);
+        }
+    });
+#endif
 }
 
 void Home::ToggleGameMenu() {
@@ -1118,9 +1306,15 @@ void Home::PollPad() {
         home_combo = true;
     } else if (!home && home_down) {
         home_down = false;
-        if (!home_combo && hooks.emulation_running() && !QApplication::activeModalWidget()) {
-            ToggleGameMenu();
-            return;
+        if (!home_combo && !QApplication::activeModalWidget()) {
+            if (hooks.emulation_running()) {
+                ToggleGameMenu();
+                return;
+            }
+            if (native_process) {
+                ToggleNativeMenu();
+                return;
+            }
         }
     }
 
@@ -1181,7 +1375,18 @@ void Home::Launch(const Game& game) {
 void Home::LaunchNative(const Game& game) {
 #ifdef _WIN32
     if (native_process) {
-        Message(QStringLiteral("Ya hay un juego abierto."));
+        // The game already running: back to it. Another one: it has to close first.
+        if (game.exe != native_exe) {
+            Message(QStringLiteral("%1 sigue abierto. Ciérralo desde su menú Home antes de abrir "
+                                   "otro juego.")
+                        .arg(native_name));
+            return;
+        }
+        if (HWND game_window = NativeWindow(native_process)) {
+            ShowWindow(game_window, IsIconic(game_window) ? SW_RESTORE : SW_SHOW);
+            SetForegroundWindow(game_window);
+        }
+        window->showMinimized();
         return;
     }
     const QFileInfo info(game.exe);
@@ -1209,6 +1414,8 @@ void Home::LaunchNative(const Game& game) {
     }
     CloseHandle(process.hThread);
     native_process = process.hProcess;
+    native_exe = game.exe;
+    native_name = game.name;
     native_timer->start();
     window->showMinimized();
 #else
@@ -1217,6 +1424,9 @@ void Home::LaunchNative(const Game& game) {
 }
 
 void Home::NativeEnded() {
+    if (native_menu && overlay->isVisible()) {
+        LeaveGameMenu(false);
+    }
 #ifdef _WIN32
     native_timer->stop();
     if (native_process) {
@@ -1224,6 +1434,13 @@ void Home::NativeEnded() {
         native_process = nullptr;
     }
 #endif
+    native_suspended = false;
+    native_exe.clear();
+    native_name.clear();
+    ShowNotos();
+}
+
+void Home::ShowNotos() {
     if (Prefs().value(QStringLiteral("fullscreen")).toBool()) {
         window->showFullScreen();
     } else {

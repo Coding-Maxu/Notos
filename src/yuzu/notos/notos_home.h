@@ -98,6 +98,13 @@ private:
     void LeaveGameMenu(bool resume);
     void GameMenuEntries();
 
+    // The Home menu over a native game (an exe Notos started).
+    void ToggleNativeMenu();
+    void NativeMenuEntries();
+    void SuspendNative(bool suspend);
+    void CloseNative();
+    void ShowNotos();
+
 public:
 
 protected:
@@ -206,6 +213,10 @@ private:
 
     // The native game running (Windows process handle), or none.
     void* native_process = nullptr;
+    QString native_exe;
+    QString native_name;
+    bool native_menu = false;      ///< the Home menu shows over the native game
+    bool native_suspended = false; ///< its process is paused for the menu
 
     // The Home menu over a running game.
     Overlay* overlay = nullptr;
