@@ -1,0 +1,166 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#pragma once
+
+#include <functional>
+#include <string>
+#include <vector>
+
+#include <QColor>
+#include <QElapsedTimer>
+#include <QJsonObject>
+#include <QPixmap>
+#include <QRect>
+#include <QWidget>
+
+#include "common/common_types.h"
+
+class QBoxLayout;
+class QMainWindow;
+class QMenu;
+class QStandardItemModel;
+class QTimer;
+
+namespace Core::HID {
+class EmulatedController;
+}
+
+namespace Notos {
+
+/// What the Notos home screen asks the main window to do.
+struct HomeHooks {
+    std::function<void(const QString& path, u64 program_id)> play;
+    std::function<void()> add_folder;
+    std::function<void()> open_settings; ///< the emulator's settings
+    std::function<void(u64 program_id, const std::string& path)> game_settings;
+    std::function<void(u64 program_id)> delete_shader_cache; ///< after a confirmation
+    /// The game list's own right-click entries for a Switch game.
+    std::function<void(QMenu& menu, u64 program_id, const std::string& path)> game_menu;
+    std::function<void()> open_saves;
+    std::function<bool()> single_window;
+    std::function<bool()> emulation_running;
+    std::function<Core::HID::EmulatedController*()> controller; ///< player 1, for gamepad navigation
+    QStandardItemModel* model = nullptr;
+};
+
+/// The Notos main screen, drawn like the Recomp Launcher: the title of the selected game over a
+/// row of large covers (Switch games from the game list, and native games such as recompiled
+/// ports), round buttons (Add, Settings, Exit) and centred menus. Keyboard, mouse and gamepad.
+class Home : public QWidget {
+    Q_OBJECT
+public:
+    Home(QMainWindow* window, QBoxLayout* central, QWidget* game_list, QWidget* placeholder,
+         HomeHooks hooks);
+
+    /// A game is starting in the main window: the render view takes the space.
+    void OnEmulationStarting();
+
+protected:
+    bool event(QEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
+    void paintEvent(QPaintEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
+    void wheelEvent(QWheelEvent* event) override;
+
+private:
+    struct Game {
+        QString name;
+        bool native = false;
+        QString exe;  ///< native: the program
+        QString args; ///< native: its arguments
+        bool show_console = false;
+        QString path; ///< Switch: the game file
+        u64 program_id = 0;
+        QPixmap cover;
+    };
+    struct Entry {
+        std::function<QString()> label;
+        std::function<void()> act;
+        std::function<void(int)> adjust; ///< left / right: -1 or +1
+        bool close = true;               ///< close the menu before act
+    };
+
+    // Data
+    void LoadConfig();
+    void SaveConfig();
+    void Refresh();
+    QString CoverFor(const QString& key) const;
+    QJsonObject Prefs() const;
+    void SetSetting(const QString& key, const QJsonValue& value);
+    QColor Accent() const;
+    bool Dark() const;
+
+    // Screens
+    void ShowHome();
+    void ShowList();
+    void Restore();
+    void ApplyFullscreen();
+
+    // Navigation
+    void Nav(const QString& cmd);
+    void Select();
+    void PollPad();
+    void Launch(const Game& game);
+    void LaunchNative(const Game& game);
+    void NativeEnded();
+
+    // Menus
+    void OpenMenu(const QString& title, std::vector<Entry> entries);
+    void CloseMenu();
+    void RunEntry(int index);
+    void AddMenu();
+    void SettingsMenu();
+    void GameMenu();
+    void Message(const QString& text);
+
+    // Actions
+    void AddNative();
+    void ImportLauncher();
+    void PickCover(const Game& game);
+    void RenameNative(int index);
+    void MoveNative(int index, int delta);
+    void RemoveNative(int index);
+    int NativeIndex(const Game& game) const;
+
+    QMainWindow* window;
+    QWidget* game_list;
+    QWidget* placeholder;
+    HomeHooks hooks;
+    QTimer* refresh_timer = nullptr;
+    QTimer* clock_timer = nullptr;
+    QTimer* pad_timer = nullptr;
+    QTimer* native_timer = nullptr;
+    QAction* home_action = nullptr;
+
+    QJsonObject config;
+    std::vector<Game> games;
+    int row = 0; ///< 0: covers, 1: round buttons
+    int game_index = 0;
+    int button_index = 0;
+    double scroll = 0;
+    bool list_mode = false;
+    bool status_was_visible = true;
+
+    QString menu_title;
+    std::vector<Entry> menu;
+    int menu_index = 0;
+
+    // Hit areas from the last paint.
+    std::vector<QRect> tile_rects;
+    std::vector<QRect> button_rects;
+    std::vector<QRect> menu_rects;
+    QRect menu_box;
+
+    // Gamepad: the buttons held at the last poll and when a direction repeats next.
+    u64 pad_held = 0;
+    QString pad_repeat_cmd;
+    QElapsedTimer pad_repeat;
+    int pad_repeat_delay = 0;
+
+    // The native game running (Windows process handle), or none.
+    void* native_process = nullptr;
+};
+
+} // namespace Notos

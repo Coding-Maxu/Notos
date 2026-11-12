@@ -213,6 +213,8 @@ add_executable(yuzu
     fritchii/fritchii_ui.h
     fritchii/home.cpp
     fritchii/home.h
+    notos/notos_home.cpp
+    notos/notos_home.h
     fritchii/game_controls.cpp
     fritchii/game_controls.h
     fritchii/main_window_fritchii.cpp

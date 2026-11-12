@@ -16,7 +16,10 @@
 #include "yuzu/fritchii/fritchii_ui.h"
 #include "yuzu/bootmanager.h"
 #include "yuzu/fritchii/game_controls.h"
-#include "yuzu/fritchii/home.h"
+#include "hid_core/frontend/emulated_controller.h"
+#include "hid_core/hid_core.h"
+#include "yuzu/fritchii/saves_window.h"
+#include "yuzu/notos/notos_home.h"
 #include "yuzu/fritchii/precompile_gate.h"
 #include "yuzu/fritchii/whats_new.h"
 #include "yuzu/game/game_list.h"
@@ -113,8 +116,8 @@ void MainWindow::SetUpFritchiiUi() {
     };
     statusBar()->insertPermanentWidget(0, FritchiiUi::MakeGraphicsButton(this, graphics));
 
-    // Home screen and rail.
-    FritchiiUi::HomeHooks home{
+    // Home screen.
+    Notos::HomeHooks home{
         .play = [this](const QString& path, u64 program_id) { OnGameListLoadFile(path, program_id); },
         .add_folder = [this] { OnGameListAddDirectory(); },
         .open_settings = [this] { OnConfigure(); },
@@ -127,18 +130,24 @@ void MainWindow::SetUpFritchiiUi() {
             [this](QMenu& menu, u64 program_id, const std::string& path) {
                 game_list->AddGameMenu(menu, program_id, path);
             },
-        .game_list_empty = [this] { return game_list->IsEmpty(); },
+        .open_saves =
+            [this] {
+                FritchiiUi::ShowSavesWindow(this, [this] { return emulation_running; });
+            },
         .single_window = [this] { return ui->action_Single_Window_Mode->isChecked(); },
         .emulation_running = [this] { return emulation_running; },
+        .controller =
+            [] {
+                return QtCommon::system ? QtCommon::system->HIDCore().GetEmulatedController(
+                                              Core::HID::NpadIdType::Player1)
+                                        : nullptr;
+            },
         .model = game_list->GetModel(),
-        .help_menu = ui->menu_Help,
-        .classic_menus = {ui->menu_File, ui->menu_Emulation, ui->menu_View, ui->menu_Tools,
-                          ui->menu_Help},
     };
-    fritchii_home = new FritchiiUi::Home(this, ui->horizontalLayout, game_list,
-                                         game_list_placeholder, std::move(home));
-    connect(this, &MainWindow::EmulationStarting, fritchii_home,
-            &FritchiiUi::Home::OnEmulationStarting);
+    // Notos: the launcher-style home screen in place of Fritchii's (FritchiiUi::Home).
+    auto* notos_home = new Notos::Home(this, ui->horizontalLayout, game_list,
+                                       game_list_placeholder, std::move(home));
+    connect(this, &MainWindow::EmulationStarting, notos_home, &Notos::Home::OnEmulationStarting);
 
     // In-game controls: the menu bar is gone and the rail steps aside while a game runs.
     auto* controls = new FritchiiUi::GameControls(
