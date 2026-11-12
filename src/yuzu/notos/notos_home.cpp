@@ -2570,7 +2570,7 @@ void Home::AddMenu() {
              {
                  Entry{[] { return QStringLiteral("Carpeta de juegos de Switch"); },
                        [this] { hooks.add_folder(); }, {}, true},
-                 Entry{[] { return QStringLiteral("Juego de Switch 2 (.nup)"); },
+                 Entry{[] { return QStringLiteral("Juego de Switch (.nup, .nsp, .xci…)"); },
                        [this] { AddSwitchFile(); }, {}, true},
                  Entry{[] { return QStringLiteral("Juego nativo (.exe)"); },
                        [this] { AddNative(); }, {}, true},
@@ -2816,9 +2816,10 @@ void Home::AddNative() {
 
 void Home::AddSwitchFile() {
     const QString path = QFileDialog::getOpenFileName(
-        window, QStringLiteral("Juego de Switch 2"), {},
-        QStringLiteral("Juegos de Switch 2 (*.nup);;Juegos de Switch (*.nsp *.xci *.nsz *.xcz "
-                       "*.nx);;Todos los archivos (*)"));
+        window, QStringLiteral("Juego de Switch"), {},
+        QStringLiteral("Juegos de Switch y Switch 2 (*.nup *.nsp *.xci *.nsz *.xcz *.nx);;"
+                       "Switch 2 (*.nup);;Switch (*.nsp *.xci *.nsz *.xcz *.nx);;"
+                       "Todos los archivos (*)"));
     if (path.isEmpty()) {
         return;
     }
