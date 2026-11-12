@@ -617,8 +617,33 @@ void Home::Refresh() {
         games.push_back(std::move(game));
     }
 
-    // Then the Switch games of the game list.
+    // Then the Switch games added as files, and those of the game list's folders.
     std::set<QString> seen;
+    for (const QJsonValue& value : config.value(QStringLiteral("files")).toArray()) {
+        const QJsonObject object = value.toObject();
+        Game game;
+        game.picked = true;
+        game.path = object.value(QStringLiteral("path")).toString();
+        if (game.path.isEmpty() || !seen.insert(game.path).second) {
+            continue;
+        }
+        game.program_id = object.value(QStringLiteral("programId")).toString().toULongLong(nullptr, 16);
+        game.name = object.value(QStringLiteral("name")).toString();
+        if (game.name.isEmpty()) {
+            game.name = QFileInfo(game.path).completeBaseName();
+        }
+        game.cover = LoadCover(CoverFor(game.path));
+        if (game.cover.isNull()) {
+            game.cover = LoadCover(object.value(QStringLiteral("icon")).toString());
+        }
+        if (IsBlank(game.cover)) {
+            game.cover = LocalCover(game.path);
+        }
+        if (IsBlank(game.cover)) {
+            game.cover = {};
+        }
+        games.push_back(std::move(game));
+    }
     const auto add = [&](const QStandardItem* item) {
         if (item->data(GameListItem::TypeRole).toInt() !=
             static_cast<int>(GameListItemType::Game)) {
@@ -2545,6 +2570,8 @@ void Home::AddMenu() {
              {
                  Entry{[] { return QStringLiteral("Carpeta de juegos de Switch"); },
                        [this] { hooks.add_folder(); }, {}, true},
+                 Entry{[] { return QStringLiteral("Juego de Switch 2 (.nup)"); },
+                       [this] { AddSwitchFile(); }, {}, true},
                  Entry{[] { return QStringLiteral("Juego nativo (.exe)"); },
                        [this] { AddNative(); }, {}, true},
                  Entry{[] { return QStringLiteral("Importar juegos del Recomp Launcher"); },
@@ -2688,8 +2715,21 @@ void Home::GameMenu() {
         entries.push_back(Entry{[] { return QStringLiteral("Borrar caché de shaders"); },
                                 [this, game] { hooks.delete_shader_cache(game.program_id); }, {},
                                 true});
-        const QString folder = hooks.game_dir_of ? hooks.game_dir_of(game.path) : QString{};
-        if (!folder.isEmpty()) {
+        const QString folder = !game.picked && hooks.game_dir_of ? hooks.game_dir_of(game.path)
+                                                                 : QString{};
+        if (game.picked) {
+            entries.push_back(Entry{
+                [] { return QStringLiteral("Borrar juego"); },
+                [this, game] {
+                    OpenMenu(QStringLiteral("¿Borrar %1 de la lista? El archivo queda en tu disco.")
+                                 .arg(game.name),
+                             {Entry{[] { return QStringLiteral("No"); }, [] {}, {}, true},
+                              Entry{[] { return QStringLiteral("Sí, borrar"); },
+                                    [this, game] { RemoveSwitchFile(game.path); }, {}, true}});
+                },
+                {},
+                false});
+        } else if (!folder.isEmpty()) {
             entries.push_back(Entry{
                 [] { return QStringLiteral("Borrar juego"); },
                 [this, game, folder] {
@@ -2697,7 +2737,7 @@ void Home::GameMenu() {
                     // listed from the same folder go with it, so the question names them.
                     int others = 0;
                     for (const Game& other : games) {
-                        if (!other.native && other.path != game.path &&
+                        if (!other.native && !other.picked && other.path != game.path &&
                             QDir::cleanPath(other.path).startsWith(folder + QLatin1Char('/'), Qt::CaseInsensitive)) {
                             ++others;
                         }
@@ -2771,6 +2811,82 @@ void Home::AddNative() {
     SaveConfig();
     game_index = natives.size() - 1;
     row = 0;
+    Refresh();
+}
+
+void Home::AddSwitchFile() {
+    const QString path = QFileDialog::getOpenFileName(
+        window, QStringLiteral("Juego de Switch 2"), {},
+        QStringLiteral("Juegos de Switch 2 (*.nup);;Juegos de Switch (*.nsp *.xci *.nsz *.xcz "
+                       "*.nx);;Todos los archivos (*)"));
+    if (path.isEmpty()) {
+        return;
+    }
+    const QString file = QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath());
+    QString name;
+    QByteArray icon;
+    u64 program_id = 0;
+    if (!hooks.read_game || !hooks.read_game(file, name, icon, program_id)) {
+        Message(QStringLiteral("%1 no es un juego que Notos pueda abrir.")
+                    .arg(QFileInfo(path).fileName()));
+        return;
+    }
+    if (name.trimmed().isEmpty()) {
+        name = QFileInfo(path).completeBaseName();
+    }
+    // Its icon is kept next to notos.json: the file isn't read again at every start.
+    QString icon_path;
+    if (QPixmap pixmap; pixmap.loadFromData(icon)) {
+        const QString dir = QFileInfo(ConfigPath()).absolutePath() + QStringLiteral("/notos_icons");
+        QDir().mkpath(dir);
+        icon_path = QStringLiteral("%1/%2.png")
+                        .arg(dir)
+                        .arg(program_id != 0 ? QString::number(program_id, 16).toUpper()
+                                             : QString::number(qHash(file), 16));
+        if (!pixmap.save(icon_path, "PNG")) {
+            icon_path.clear();
+        }
+    }
+    QJsonArray files = config.value(QStringLiteral("files")).toArray();
+    for (int i = 0; i < files.size(); ++i) {
+        if (files[i].toObject().value(QStringLiteral("path")).toString().compare(
+                file, Qt::CaseInsensitive) == 0) {
+            files.removeAt(i);
+            break;
+        }
+    }
+    files.append(QJsonObject{
+        {QStringLiteral("path"), file},
+        {QStringLiteral("name"), name.trimmed()},
+        {QStringLiteral("programId"), QString::number(program_id, 16).toUpper()},
+        {QStringLiteral("icon"), QDir::toNativeSeparators(icon_path)}});
+    config.insert(QStringLiteral("files"), files);
+    SaveConfig();
+    Refresh();
+    for (int i = 0; i < static_cast<int>(games.size()); ++i) {
+        if (!games[i].native && games[i].path == file) {
+            game_index = i;
+        }
+    }
+    row = 0;
+    Select();
+}
+
+void Home::RemoveSwitchFile(const QString& path) {
+    QJsonArray files = config.value(QStringLiteral("files")).toArray();
+    for (int i = 0; i < files.size(); ++i) {
+        const QJsonObject object = files[i].toObject();
+        if (object.value(QStringLiteral("path")).toString() == path) {
+            QFile::remove(object.value(QStringLiteral("icon")).toString());
+            files.removeAt(i);
+            break;
+        }
+    }
+    config.insert(QStringLiteral("files"), files);
+    QJsonObject covers = config.value(QStringLiteral("covers")).toObject();
+    covers.remove(path);
+    config.insert(QStringLiteral("covers"), covers);
+    SaveConfig();
     Refresh();
 }
 

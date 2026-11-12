@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <QBrush>
+#include <QByteArray>
 #include <QColor>
 #include <QDateTime>
 #include <QElapsedTimer>
@@ -59,6 +60,9 @@ struct HomeHooks {
     /// Whether the next game starts in fullscreen (the emulator's Fullscreen action, unchecked
     /// without a game).
     std::function<void(bool)> set_game_fullscreen;
+    /// A game file's title, icon and program id, read from the file itself (false: not a game).
+    std::function<bool(const QString& path, QString& name, QByteArray& icon, u64& program_id)>
+        read_game;
 };
 
 class Home;
@@ -147,6 +151,7 @@ private:
         bool show_console = false;
         QString path; ///< Switch: the game file
         u64 program_id = 0;
+        bool picked = false; ///< Switch: a file the player added on its own, not from a folder
         QPixmap cover;
     };
     struct Entry {
@@ -196,6 +201,8 @@ private:
 
     // Actions
     void AddNative();
+    void AddSwitchFile();
+    void RemoveSwitchFile(const QString& path);
     void ImportLauncher();
     void PickCover(const Game& game);
     void RenameNative(int index);

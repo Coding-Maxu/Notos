@@ -12,6 +12,8 @@
 #include <QTimer>
 
 #include "core/core.h"
+#include "core/file_sys/vfs/vfs_real.h"
+#include "core/loader/loader.h"
 #include "qt_common/qt_common.h"
 #include "qt_common/util/game.h"
 #include "ui_main.h"
@@ -202,6 +204,39 @@ void MainWindow::SetUpFritchiiUi() {
                 if (!emulation_running) {
                     ui->action_Fullscreen->setChecked(on);
                 }
+            },
+        .read_game =
+            [](const QString& path, QString& name, QByteArray& icon, u64& program_id) {
+                // As the game list reads the files of its folders.
+                if (!QtCommon::system || !QtCommon::vfs) {
+                    return false;
+                }
+                const auto file =
+                    QtCommon::vfs->OpenFile(path.toStdString(), FileSys::OpenMode::Read);
+                if (!file) {
+                    return false;
+                }
+                const auto loader = Loader::GetLoader(*QtCommon::system, file);
+                if (!loader) {
+                    return false;
+                }
+                const auto type = loader->GetFileType();
+                if (type == Loader::FileType::Unknown || type == Loader::FileType::Error) {
+                    return false;
+                }
+                program_id = 0;
+                void(loader->ReadProgramId(program_id));
+                std::vector<u8> data;
+                if (loader->ReadIcon(data) == Loader::ResultStatus::Success) {
+                    icon = QByteArray(reinterpret_cast<const char*>(data.data()),
+                                      static_cast<qsizetype>(data.size()));
+                }
+                std::string title;
+                if (loader->ReadTitle(title) == Loader::ResultStatus::Success &&
+                    title != " ") {
+                    name = QString::fromStdString(title).trimmed();
+                }
+                return true;
             },
     };
     // Notos: the launcher-style home screen in place of Fritchii's (FritchiiUi::Home).
