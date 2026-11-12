@@ -15,7 +15,9 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <atomic>
 #include <set>
+#include <thread>
 
 #include <QAction>
 #include <QApplication>
@@ -251,6 +253,22 @@ void MakeBorderless(HWND hwnd) {
     SetWindowPos(hwnd, nullptr, m.left, m.top, m.right - m.left, m.bottom - m.top,
                  SWP_FRAMECHANGED | SWP_NOZORDER | SWP_SHOWWINDOW);
 }
+
+/// MakeBorderless off Notos's thread: changing another program's window waits for that program,
+/// and a game busy closing or loading would freeze Notos with it (and a game waiting on Notos
+/// would never end).
+void MakeBorderlessAsync(HWND hwnd) {
+    static std::atomic<bool> busy{false};
+    if (busy.exchange(true)) {
+        return;
+    }
+    std::thread([hwnd] {
+        if (IsWindow(hwnd)) {
+            MakeBorderless(hwnd);
+        }
+        busy = false;
+    }).detach();
+}
 #endif
 
 QFont Font(const QFont& base, double px, QFont::Weight weight = QFont::Normal) {
@@ -334,11 +352,11 @@ Home::Home(QMainWindow* window_, QBoxLayout* central, QWidget* game_list_, QWidg
         }
         // Games size their window again while they start (DK Bananza once its shaders are
         // ready): it is made borderless again for a while after it shows.
-        if (native_window && !native_suspended && GamesFullscreen() &&
+        if (native_window && !native_suspended && !closing && GamesFullscreen() &&
             native_window_seen.isValid() && native_window_seen.elapsed() < 15000) {
             if (HWND game_window = NativeWindow(native_process);
                 game_window && !IsHungAppWindow(game_window)) {
-                MakeBorderless(game_window);
+                MakeBorderlessAsync(game_window);
             }
         }
 #endif
@@ -886,7 +904,7 @@ void Home::LoadingTick() {
         native_window = game_window;
         native_window_seen.restart(); // native_timer keeps it borderless for a while
         if (GamesFullscreen()) {
-            MakeBorderless(game_window);
+            MakeBorderlessAsync(game_window);
         }
         loading_progress = 1;
         loading_status = QStringLiteral("Iniciando…");
@@ -2395,7 +2413,7 @@ void Home::LaunchNative(const Game& game) {
             return;
         }
         if (HWND game_window = NativeWindow(native_process)) {
-            ShowWindow(game_window, IsIconic(game_window) ? SW_RESTORE : SW_SHOW);
+            ShowWindowAsync(game_window, IsIconic(game_window) ? SW_RESTORE : SW_SHOW);
             SetForegroundWindow(game_window);
         }
         window->showMinimized();
