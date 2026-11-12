@@ -6,7 +6,9 @@
 #include <string>
 #include <vector>
 
+#include <QBrush>
 #include <QColor>
+#include <QDateTime>
 #include <QElapsedTimer>
 #include <QJsonObject>
 #include <QPixmap>
@@ -51,6 +53,9 @@ struct HomeHooks {
     std::function<void()> game_config;    ///< the running game's own settings
     std::function<void()> toggle_fullscreen;
     std::function<bool()> fullscreen;
+    /// Whether the next game starts in fullscreen (the emulator's Fullscreen action, unchecked
+    /// without a game).
+    std::function<void(bool)> set_game_fullscreen;
 };
 
 class Home;
@@ -88,9 +93,20 @@ public:
     /// The Home menu over the running game: opens it (pausing the game) or closes it (resuming).
     void ToggleGameMenu();
 
+    /// The emulator's shader loading at boot (stage 0 prepare, 1 build, 2 complete).
+    void OnLoadProgress(int stage, qulonglong value, qulonglong total);
+    /// The emulator's own loading screen went away: the game shows.
+    void OnLoadFinished();
+
 private:
     friend class Overlay;
     void PaintMenu(QPainter& p, const QRect& area);
+    /// The loading screen: the game's cover, its name and a bar.
+    void PaintLoading(QPainter& p, const QRect& area);
+    void LoadingTick();
+    void ReadNativeProgress();
+    void EndLoading();
+    bool GamesFullscreen() const;
     /// A click on the open menu: an entry, or outside the menu (closes it).
     void MenuMouse(const QPoint& pos, Qt::MouseButton button);
     QString KeyCommand(int key) const;
@@ -142,7 +158,11 @@ private:
     QJsonObject Prefs() const;
     void SetSetting(const QString& key, const QJsonValue& value);
     QColor Accent() const;
+    bool Rainbow() const; ///< the accent is the slowly moving rainbow
+    /// What marks the selection: the accent, or the rainbow turning around `rect`.
+    QBrush AccentBrush(const QRectF& rect) const;
     bool Dark() const;
+    void AnimTick();
 
     // Screens
     void ShowHome();
@@ -193,6 +213,18 @@ private:
     int button_index = 0;
     double scroll = 0;
     bool list_mode = false;
+
+    // Animation: the covers glide to where the selection wants them, the selected one grows, and
+    // the opening sequence plays once.
+    QTimer* anim_timer = nullptr;
+    QElapsedTimer anim_clock;
+    qint64 anim_last = 0;
+    int anim_ticks = 0;
+    double scroll_target = 0;
+    std::vector<double> focus; ///< per cover: 0 resting .. 1 selected
+    bool intro_pending = true;
+    double intro_start = -1; ///< milliseconds played (frames shown, not the clock), or -1
+    int intro_calm = 0;      ///< frames in a row on time: the start-up work is over
     bool status_was_visible = true;
 
     QString menu_title;
@@ -217,6 +249,22 @@ private:
     QString native_name;
     bool native_menu = false;      ///< the Home menu shows over the native game
     bool native_suspended = false; ///< its process is paused for the menu
+    void* native_window = nullptr; ///< the game's window once it shows (HWND)
+    QElapsedTimer native_window_seen;
+    // Whether the game's window answers messages yet (it doesn't while the game loads).
+    QElapsedTimer native_ping;
+    bool native_ping_out = false;
+    bool native_ready = false;
+
+    // The loading screen, from choosing a game until the game shows.
+    bool loading = false;
+    bool loading_emulated = false; ///< drawn in the overlay over the emulator's own loading screen
+    Game loading_game;
+    int loading_phase = 0;
+    double loading_progress = -1; ///< 0..1, or -1 while unknown (a block runs along the bar)
+    QString loading_status;
+    QDateTime launch_time;
+    QTimer* loading_timer = nullptr;
 
     // The Home menu over a running game.
     Overlay* overlay = nullptr;

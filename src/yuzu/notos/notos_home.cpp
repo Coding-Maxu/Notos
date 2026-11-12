@@ -36,6 +36,7 @@
 #include <QPainter>
 #include <QGuiApplication>
 #include <QPainterPath>
+#include <QRegularExpression>
 #include <QScreen>
 #include <QShortcut>
 #include <QStandardItemModel>
@@ -52,14 +53,31 @@ namespace Notos {
 namespace {
 
 // The launcher's colour choices: Spanish name, colour.
-constexpr std::array<std::pair<const char*, const char*>, 6> Accents{{
+constexpr std::array<std::pair<const char*, const char*>, 7> Accents{{
     {"Azul", "#2F9BFF"},
     {"Rojo", "#FF4D4D"},
     {"Verde", "#3DDC84"},
     {"Amarillo", "#FFC83D"},
     {"Morado", "#A66BFF"},
     {"Naranja", "#FF8A3D"},
+    {"Arcoíris", "rainbow"}, // every colour, turning slowly
 }};
+
+// The opening sequence, in milliseconds: the emblem alone, then it flies to its corner while the
+// home screen comes in.
+constexpr double IntroMerge = 1700, IntroMergeTime = 700, IntroUi = 2050, IntroTotal = 3300;
+
+double Clamp01(double x) {
+    return std::clamp(x, 0.0, 1.0);
+}
+double EaseOut(double x) {
+    x = Clamp01(x);
+    return 1 - (1 - x) * (1 - x) * (1 - x);
+}
+double EaseInOut(double x) {
+    x = Clamp01(x);
+    return x < 0.5 ? 4 * x * x * x : 1 - std::pow(-2 * x + 2, 3) / 2;
+}
 
 // Sizes in pixels at 1920x1080 (the Recomp Launcher's layout as the player tuned it).
 constexpr double TopBar = 96, Tile = 320, TileGap = 6, TileBorder = 5, TilePad = 4, TitleSize = 27,
@@ -144,6 +162,21 @@ QPixmap LocalCover(const QString& game_path) {
 }
 
 #ifdef _WIN32
+/// A window Windows keeps off screen although it is "visible": games create theirs cloaked and
+/// show it once their first frame is ready (DK Bananza after its shaders).
+bool IsCloaked(HWND hwnd) {
+    using GetAttribute = HRESULT(WINAPI*)(HWND, DWORD, PVOID, DWORD);
+    static const auto get_attribute = [] {
+        const HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
+        return dwm ? reinterpret_cast<GetAttribute>(GetProcAddress(dwm, "DwmGetWindowAttribute"))
+                   : nullptr;
+    }();
+    constexpr DWORD Cloaked = 14; // DWMWA_CLOAKED
+    DWORD cloaked = 0;
+    return get_attribute && SUCCEEDED(get_attribute(hwnd, Cloaked, &cloaked, sizeof(cloaked))) &&
+           cloaked != 0;
+}
+
 /// The native game's main window: its largest visible top-level window.
 HWND NativeWindow(void* process) {
     if (!process) {
@@ -159,7 +192,8 @@ HWND NativeWindow(void* process) {
             auto& f = *reinterpret_cast<Find*>(data);
             DWORD pid = 0;
             GetWindowThreadProcessId(hwnd, &pid);
-            if (pid != f.pid || !IsWindowVisible(hwnd) || GetWindow(hwnd, GW_OWNER)) {
+            if (pid != f.pid || !IsWindowVisible(hwnd) || GetWindow(hwnd, GW_OWNER) ||
+                IsCloaked(hwnd)) {
                 return TRUE;
             }
             RECT r{};
@@ -174,6 +208,31 @@ HWND NativeWindow(void* process) {
         },
         reinterpret_cast<LPARAM>(&find));
     return find.best;
+}
+
+/// The game's window without its frame, over the whole screen it is on.
+void MakeBorderless(HWND hwnd) {
+    MONITORINFO monitor{};
+    monitor.cbSize = sizeof(monitor);
+    if (!GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor)) {
+        return;
+    }
+    const RECT& m = monitor.rcMonitor;
+    constexpr LONG_PTR Frame =
+        WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU;
+    const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    RECT r{};
+    GetWindowRect(hwnd, &r);
+    if ((style & Frame) == 0 && r.left == m.left && r.top == m.top && r.right == m.right &&
+        r.bottom == m.bottom) {
+        return; // already
+    }
+    if (IsZoomed(hwnd)) {
+        ShowWindow(hwnd, SW_RESTORE);
+    }
+    SetWindowLongPtrW(hwnd, GWL_STYLE, style & ~Frame);
+    SetWindowPos(hwnd, nullptr, m.left, m.top, m.right - m.left, m.bottom - m.top,
+                 SWP_FRAMECHANGED | SWP_NOZORDER | SWP_SHOWWINDOW);
 }
 #endif
 
@@ -252,9 +311,34 @@ Home::Home(QMainWindow* window_, QBoxLayout* central, QWidget* game_list_, QWidg
 #ifdef _WIN32
         if (native_process && WaitForSingleObject(native_process, 0) == WAIT_OBJECT_0) {
             NativeEnded();
+            return;
+        }
+        // Games size their window again while they start (DK Bananza once its shaders are
+        // ready): it is made borderless again for a while after it shows.
+        if (native_window && !native_suspended && GamesFullscreen() &&
+            native_window_seen.isValid() && native_window_seen.elapsed() < 15000) {
+            if (HWND game_window = NativeWindow(native_process);
+                game_window && !IsHungAppWindow(game_window)) {
+                MakeBorderless(game_window);
+            }
         }
 #endif
     });
+
+    anim_clock.start();
+    anim_timer = new QTimer(this);
+    anim_timer->setTimerType(Qt::PreciseTimer);
+    anim_timer->setInterval(8); // a frame at up to 120 Hz
+    connect(anim_timer, &QTimer::timeout, this, &Home::AnimTick);
+    anim_timer->start();
+
+    loading_timer = new QTimer(this);
+    loading_timer->setInterval(33);
+    connect(loading_timer, &QTimer::timeout, this, &Home::LoadingTick);
+
+    if (hooks.set_game_fullscreen) {
+        hooks.set_game_fullscreen(GamesFullscreen()); // also for a game Notos starts with
+    }
 
     QTimer::singleShot(0, this, [this] {
         Restore();
@@ -290,9 +374,14 @@ QJsonObject Home::Prefs() const {
     };
     fallback("theme", QStringLiteral("dark"));
     fallback("accent", QString::fromLatin1(Accents[0].second));
-    fallback("fullscreen", false);
+    fallback("fullscreen", true);
+    fallback("gamesFullscreen", true);
     fallback("clock24", true);
     return settings;
+}
+
+bool Home::GamesFullscreen() const {
+    return Prefs().value(QStringLiteral("gamesFullscreen")).toBool();
 }
 
 void Home::SetSetting(const QString& key, const QJsonValue& value) {
@@ -303,9 +392,80 @@ void Home::SetSetting(const QString& key, const QJsonValue& value) {
     update();
 }
 
+bool Home::Rainbow() const {
+    return Prefs().value(QStringLiteral("accent")).toString() == QStringLiteral("rainbow");
+}
+
 QColor Home::Accent() const {
+    if (Rainbow()) {
+        // One turn of the colour wheel every 24 seconds.
+        return Hsv(anim_clock.elapsed() * 0.015, 0.62, 1.0);
+    }
     const QColor color(Prefs().value(QStringLiteral("accent")).toString());
     return color.isValid() ? color : QColor(Accents[0].second);
+}
+
+QBrush Home::AccentBrush(const QRectF& rect) const {
+    if (!Rainbow()) {
+        return Accent();
+    }
+    QConicalGradient gradient(rect.center(), std::fmod(anim_clock.elapsed() * 0.03, 360.0));
+    for (int i = 0; i <= 6; ++i) {
+        gradient.setColorAt(i / 6.0, Hsv(i * 60.0, 0.62, 1.0));
+    }
+    return gradient;
+}
+
+void Home::AnimTick() {
+    const qint64 now = anim_clock.elapsed();
+    const double dt = static_cast<double>(std::min<qint64>(now - anim_last, 100));
+    anim_last = now;
+    ++anim_ticks;
+    if (!isVisible()) {
+        return;
+    }
+    // The opening plays on frames actually shown: Notos is busy for a few seconds when it starts,
+    // and a sequence timed on the clock would be over before anyone saw it.
+    if (intro_pending) {
+        intro_calm = dt < 30 ? intro_calm + 1 : 0;
+        if (intro_calm >= 20) {
+            intro_pending = false;
+            intro_start = 0;
+        }
+    } else if (intro_start >= 0) {
+        intro_start += std::min(dt, 34.0);
+        if (intro_start >= IntroTotal) {
+            intro_start = -1;
+        }
+    }
+    bool moving = intro_pending || intro_start >= 0;
+    // Each frame covers a share of what is left: quick at first, soft at the end.
+    const double glide = 1 - std::exp(-dt / 85.0);
+    if (std::abs(scroll_target - scroll) > 0.5) {
+        scroll += (scroll_target - scroll) * glide;
+        moving = true;
+    } else if (scroll != scroll_target) {
+        scroll = scroll_target;
+        moving = true;
+    }
+    if (focus.size() != games.size()) {
+        focus.assign(games.size(), 0.0);
+    }
+    const double grow = 1 - std::exp(-dt / 75.0);
+    for (int i = 0; i < static_cast<int>(focus.size()); ++i) {
+        const double target = row == 0 && i == game_index ? 1.0 : 0.0;
+        if (std::abs(target - focus[i]) > 0.004) {
+            focus[i] += (target - focus[i]) * grow;
+            moving = true;
+        } else if (focus[i] != target) {
+            focus[i] = target;
+            moving = true;
+        }
+    }
+    // The rainbow alone turns slowly: a few frames a second are enough.
+    if (moving || loading || (Rainbow() && anim_ticks % 3 == 0)) {
+        update();
+    }
 }
 
 bool Home::Dark() const {
@@ -442,22 +602,284 @@ void Home::Restore() {
     } else {
         ShowHome();
     }
+    // Back from a game, which left the emulator's fullscreen.
+    if (Prefs().value(QStringLiteral("fullscreen")).toBool() && !window->isFullScreen() &&
+        !window->isMinimized()) {
+        ApplyFullscreen();
+    }
 }
 
 void Home::OnEmulationStarting() {
+    intro_pending = false; // no opening after a game (Notos started straight into one)
     if (!hooks.single_window()) {
+        loading_game = {};
         return;
     }
     CloseMenu();
     hide();
     window->statusBar()->setVisible(status_was_visible);
+    if (!loading_game.name.isEmpty()) {
+        // The loading screen covers the emulator's own until the game shows. The overlay appears
+        // on the first tick, once the window took its game size.
+        loading = true;
+        loading_emulated = true;
+        loading_phase = 0;
+        loading_progress = -1;
+        loading_status = QStringLiteral("Iniciando…");
+        loading_timer->start();
+        qApp->installEventFilter(this);
+    }
 }
 
 void Home::OnEmulationStopping() {
+    if (loading_emulated) {
+        EndLoading();
+    }
     if (overlay->isVisible()) {
         LeaveGameMenu(false);
     }
     home_down = false;
+}
+
+void Home::OnLoadProgress(int stage, qulonglong value, qulonglong total) {
+    if (!loading_emulated) {
+        return;
+    }
+    if (stage == 1 && total > 0) {
+        loading_progress = std::clamp(static_cast<double>(value) / total, 0.0, 1.0);
+        loading_status = QStringLiteral("Cargando shaders… %1 de %2").arg(value).arg(total);
+    } else if (stage == 0) {
+        loading_progress = -1;
+        loading_status = QStringLiteral("Preparando…");
+    } else {
+        loading_progress = -1;
+        loading_status = QStringLiteral("Iniciando…");
+    }
+}
+
+void Home::OnLoadFinished() {
+    if (loading_emulated) {
+        EndLoading();
+    }
+}
+
+// ---- the loading screen
+
+void Home::LoadingTick() {
+    if (!loading) {
+        loading_timer->stop();
+        return;
+    }
+    ++loading_phase;
+    if (loading_emulated) {
+        PlaceOverlay();
+        if (!overlay->isVisible()) {
+            overlay->show();
+        }
+        overlay->raise();
+        overlay->update();
+        return;
+    }
+#ifdef _WIN32
+    if (native_window) {
+        // Handed over: the loading screen stays behind the game's window while the game draws its
+        // first frames (an unpainted window shows what is behind it), then Notos steps aside.
+        if (native_window_seen.elapsed() > 15000) {
+            EndLoading();
+            window->showMinimized();
+            return;
+        }
+        update();
+        return;
+    }
+    if (loading_phase % 10 == 1) {
+        ReadNativeProgress();
+    }
+    HWND game_window = NativeWindow(native_process);
+    if (game_window && !native_ready && !native_ping_out) {
+        // Games show their window before they load and answer nothing until then: a message
+        // answered quickly says the game is there. Asked without waiting (no Notos freeze).
+        native_ping_out = true;
+        native_ping.restart();
+        const auto answered = [](HWND, UINT, ULONG_PTR data, LRESULT) {
+            auto* self = reinterpret_cast<Home*>(data);
+            self->native_ping_out = false;
+            if (self->native_ping.elapsed() < 250) {
+                self->native_ready = true;
+            }
+        };
+        if (!SendMessageCallbackW(game_window, WM_NULL, 0, 0, answered,
+                                  reinterpret_cast<ULONG_PTR>(this))) {
+            native_ping_out = false;
+        }
+    }
+    if (game_window && native_ready) {
+        // The game shows: it takes the screen.
+        native_window = game_window;
+        native_window_seen.restart(); // native_timer keeps it borderless for a while
+        if (GamesFullscreen()) {
+            MakeBorderless(game_window);
+        }
+        loading_progress = 1;
+        loading_status = QStringLiteral("Iniciando…");
+        SetForegroundWindow(game_window);
+        update();
+        return;
+    }
+#endif
+    update();
+}
+
+void Home::ReadNativeProgress() {
+    // Recompiled ports log their shader preparation ("123 of 456 shaders"): the newest log next
+    // to the game written since it started.
+    const QDir dir = QFileInfo(native_exe).absoluteDir();
+    QFileInfo newest;
+    for (const QString& folder : {dir.filePath(QStringLiteral("logs")), dir.absolutePath()}) {
+        const QFileInfoList logs = QDir(folder).entryInfoList({QStringLiteral("*.log")},
+                                                               QDir::Files, QDir::Time);
+        if (!logs.isEmpty() && logs.first().lastModified() >= launch_time.addSecs(-2) &&
+            (!newest.exists() || logs.first().lastModified() > newest.lastModified())) {
+            newest = logs.first();
+        }
+    }
+    if (!newest.exists()) {
+        return;
+    }
+    QFile file(newest.absoluteFilePath());
+    if (!file.open(QFile::ReadOnly)) {
+        return;
+    }
+    file.seek(std::max<qint64>(0, file.size() - 16 * 1024));
+    const QString tail = QString::fromUtf8(file.readAll());
+    static const QRegularExpression shaders(QStringLiteral("(\\d+) of (\\d+) shaders"));
+    QRegularExpressionMatch last;
+    for (auto it = shaders.globalMatch(tail); it.hasNext();) {
+        last = it.next();
+    }
+    if (last.hasMatch()) {
+        const qulonglong done = last.captured(1).toULongLong();
+        const qulonglong total = last.captured(2).toULongLong();
+        if (total > 0) {
+            loading_progress = std::clamp(static_cast<double>(done) / total, 0.0, 1.0);
+            loading_status = QStringLiteral("Cargando shaders… %1 de %2").arg(done).arg(total);
+        }
+    }
+}
+
+void Home::EndLoading() {
+    const bool emulated = loading_emulated;
+    loading = false;
+    loading_emulated = false;
+    loading_timer->stop();
+    loading_game = {};
+    loading_progress = -1;
+    loading_status.clear();
+    if (emulated) {
+        overlay->hide();
+        qApp->removeEventFilter(this);
+        if (QWidget* render = hooks.render ? hooks.render() : nullptr) {
+            render->activateWindow();
+            render->setFocus();
+        }
+    }
+    update();
+}
+
+void Home::PaintLoading(QPainter& p, const QRect& area) {
+    // As in the launcher: the cover, the name, a bar and what is happening.
+    const bool dark = Dark();
+    const QColor bg = dark ? QColor(0x2B, 0x2B, 0x2E) : QColor(0xEC, 0xEC, 0xEC);
+    const QColor panel = dark ? QColor(0x3A, 0x3A, 0x3F) : QColor(0xD6, 0xD6, 0xDA);
+    const QColor text = dark ? QColor(Qt::white) : QColor(Qt::black);
+    const QColor sub = dark ? QColor(0xA0, 0xA0, 0xA8) : QColor(0x6A, 0x6A, 0x72);
+    const QColor accent = Accent();
+    const double w = area.width();
+    const double h = area.height();
+    const double s = std::max(0.45, std::min(w / 1920.0, h / 1080.0)) * 1.1;
+    p.save();
+    p.translate(area.topLeft());
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setRenderHint(QPainter::SmoothPixmapTransform);
+    p.setRenderHint(QPainter::TextAntialiasing);
+    p.fillRect(QRectF(0, 0, w, h), bg);
+
+    const double size = std::round(std::clamp(h * 0.5, 160.0, 520.0));
+    const QFont name_font = Font(font(), 28 * s, QFont::DemiBold);
+    const QFont status_font = Font(font(), 16 * s);
+    const double name_h = QFontMetricsF(name_font).height();
+    const double status_h = QFontMetricsF(status_font).height();
+    const double gap = 24 * s;
+    const double bar_h = 8 * s;
+    const double block = size + gap + name_h + gap + bar_h + 14 * s + status_h;
+    double y = (h - block) / 2;
+
+    // Cover.
+    const QRectF cover((w - size) / 2, y, size, size);
+    QPainterPath clip;
+    clip.addRoundedRect(cover, 8 * s, 8 * s);
+    p.setPen(Qt::NoPen);
+    p.setBrush(panel);
+    p.drawPath(clip);
+    if (!loading_game.cover.isNull()) {
+        p.save();
+        p.setClipPath(clip);
+        const QPixmap scaled =
+            loading_game.cover.scaled(cover.size().toSize(), Qt::KeepAspectRatioByExpanding,
+                                      Qt::SmoothTransformation);
+        p.drawPixmap(QPointF(cover.center().x() - scaled.width() / 2.0,
+                             cover.center().y() - scaled.height() / 2.0),
+                     scaled);
+        p.restore();
+    } else {
+        p.setPen(text);
+        p.setFont(name_font);
+        p.drawText(cover.adjusted(16 * s, 16 * s, -16 * s, -16 * s),
+                   Qt::AlignCenter | Qt::TextWordWrap, loading_game.name);
+    }
+    y += size + gap;
+
+    // Name.
+    p.setPen(text);
+    p.setFont(name_font);
+    p.drawText(QRectF(32 * s, y, w - 64 * s, name_h), Qt::AlignCenter,
+               QFontMetricsF(name_font).elidedText(loading_game.name, Qt::ElideRight,
+                                                   w - 64 * s));
+    y += name_h + gap;
+
+    // Bar: the share done, or a block running along it while nobody knows.
+    const double track_w = std::min(size * 1.4, w - 64 * s);
+    const QRectF track((w - track_w) / 2, y, track_w, bar_h);
+    p.setPen(Qt::NoPen);
+    p.setBrush(panel);
+    p.drawRoundedRect(track, bar_h / 2, bar_h / 2);
+    p.setBrush(accent);
+    if (loading_progress >= 0) {
+        if (loading_progress > 0) {
+            p.drawRoundedRect(QRectF(track.left(), track.top(), track_w * loading_progress, bar_h),
+                              bar_h / 2, bar_h / 2);
+        }
+    } else {
+        const double at = (loading_phase % 60) / 60.0 * 1.3 - 0.3;
+        const double left = std::max(track.left(), track.left() + track_w * at);
+        const double right = std::min(track.right(), track.left() + track_w * (at + 0.3));
+        if (right > left) {
+            p.drawRoundedRect(QRectF(left, track.top(), right - left, bar_h), bar_h / 2,
+                              bar_h / 2);
+        }
+    }
+    y += bar_h + 14 * s;
+
+    // What is happening.
+    p.setPen(sub);
+    p.setFont(status_font);
+    p.drawText(QRectF(32 * s, y, w - 64 * s, status_h), Qt::AlignCenter, loading_status);
+
+    // How to cancel.
+    p.setFont(Font(font(), HintSize * s));
+    p.drawText(QRectF(0, h - BottomBar * s, w - SideMargin * s, BottomBar * s),
+               Qt::AlignRight | Qt::AlignVCenter, QStringLiteral("○ / Esc  Cancelar"));
+    p.restore();
 }
 
 // ---- the Home menu over a running game
@@ -474,7 +896,11 @@ Overlay::Overlay(Home* home_) : QWidget(home_->window, OverlayFlags), home{home_
 
 void Overlay::paintEvent(QPaintEvent*) {
     QPainter p(this);
-    home->PaintMenu(p, rect());
+    if (home->loading) {
+        home->PaintLoading(p, rect());
+    } else {
+        home->PaintMenu(p, rect());
+    }
 }
 
 void Overlay::keyPressEvent(QKeyEvent* event) {
@@ -492,6 +918,9 @@ void Overlay::keyPressEvent(QKeyEvent* event) {
 }
 
 void Overlay::mousePressEvent(QMouseEvent* event) {
+    if (home->loading) {
+        return;
+    }
     home->MenuMouse(event->position().toPoint(), event->button());
     update();
 }
@@ -534,7 +963,7 @@ void Home::PlaceOverlay() {
     }
     const QRect area = render && render->isVisible()
                            ? QRect(render->mapToGlobal(QPoint(0, 0)), render->size())
-                           : window->frameGeometry();
+                           : QRect(window->mapToGlobal(QPoint(0, 0)), window->size());
     if (overlay->geometry() != area) {
         overlay->setGeometry(area);
     }
@@ -570,6 +999,14 @@ void Home::LeaveGameMenu(bool resume) {
 }
 
 void Home::ToggleNativeMenu() {
+    if (loading && !native_window) {
+        return;
+    }
+    if (loading) {
+        // The game is up already: the loading screen behind it goes.
+        EndLoading();
+        window->showMinimized();
+    }
     if (overlay->isVisible()) {
         LeaveGameMenu(true);
         return;
@@ -604,13 +1041,6 @@ void Home::ToggleNativeMenu() {
 void Home::NativeMenuEntries() {
     std::vector<Entry> entries{
         Entry{[] { return QStringLiteral("Volver al juego"); }, [this] { LeaveGameMenu(true); },
-              {}, false},
-        Entry{[] { return QStringLiteral("Ir a Notos"); },
-              [this] {
-                  // The game goes on in the background; its cover in Notos goes back to it.
-                  LeaveGameMenu(false);
-                  ShowNotos();
-              },
               {}, false},
         Entry{[] { return QStringLiteral("Cerrar juego"); },
               [this] {
@@ -683,6 +1113,9 @@ void Home::CloseNative() {
 }
 
 void Home::ToggleGameMenu() {
+    if (loading) {
+        return;
+    }
     if (overlay->isVisible()) {
         LeaveGameMenu(true);
         return;
@@ -739,6 +1172,8 @@ void Home::GameMenuEntries() {
               [this](int) {
                   if (hooks.toggle_fullscreen) {
                       hooks.toggle_fullscreen();
+                      // The next games start the way the player left this one.
+                      SetSetting(QStringLiteral("gamesFullscreen"), hooks.fullscreen());
                   }
               },
               false},
@@ -825,17 +1260,105 @@ void Home::paintEvent(QPaintEvent*) {
     const double s = std::max(0.45, std::min(width() / 1920.0, height() / 1080.0)) * 1.1;
     const int w = width();
     const int h = height();
+    if (loading) {
+        PaintLoading(p, rect());
+        return;
+    }
     p.fillRect(rect(), bg);
+
+    // The opening sequence, once: the emblem appears alone in the middle of light, then flies to
+    // its corner while the home screen comes in. `merge` is how far the emblem has flown, `ui`
+    // how far the home screen has come in.
+    if (intro_pending) {
+        return; // the empty screen until Notos has started up (AnimTick)
+    }
+    const double it = intro_start;
+    const bool intro = it >= 0;
+    const double merge = intro ? EaseInOut((it - IntroMerge) / IntroMergeTime) : 1.0;
+    const double ui = intro ? EaseOut((it - IntroUi) / 650.0) : 1.0;
 
     // Top bar: the Notos badge, the clock.
     const double badge = BadgeSize * s;
     const QRectF badge_rect(48 * s, TopBar * s - badge, badge, badge);
-    const QPixmap icon = window->windowIcon().pixmap(static_cast<int>(badge * 2));
-    p.drawPixmap(badge_rect, icon, QRectF(icon.rect()));
+    QRectF icon_rect = badge_rect;
+    if (intro) {
+        const double appear = EaseOut(it / 800.0);
+        const double alone = 1 - merge;
+        const QPointF centre(w / 2.0, h / 2.0 - 36 * s);
+        const double big = 200 * s * (0.72 + 0.28 * appear);
+
+        // Light behind the emblem, breathing.
+        const double breath = 0.85 + 0.15 * std::sin(it / 260.0);
+        QRadialGradient glow(centre, 560 * s);
+        QColor inner = accent;
+        inner.setAlphaF(0.34 * appear * alone * breath);
+        QColor mid = accent;
+        mid.setAlphaF(0.10 * appear * alone);
+        QColor outer_colour = accent;
+        outer_colour.setAlphaF(0);
+        glow.setColorAt(0, inner);
+        glow.setColorAt(0.45, mid);
+        glow.setColorAt(1, outer_colour);
+        p.fillRect(rect(), glow);
+
+        // Specks of light drifting up.
+        p.setPen(Qt::NoPen);
+        for (int i = 0; i < 46; ++i) {
+            const double a = std::fmod(i * 0.6180339887, 1.0);
+            const double b = std::fmod(i * 0.7548776662, 1.0);
+            const double c = std::fmod(i * 0.5698402910, 1.0);
+            const double x = w * a + std::sin(it / 900.0 + i) * 14 * s;
+            const double y = h * (1.08 - std::fmod(b + it / (9000.0 + 9000.0 * c), 1.0) * 1.16);
+            const double closeness = 1 - Clamp01(std::hypot(x - centre.x(), y - centre.y()) / (w * 0.6));
+            QColor speck = i % 3 == 0 ? accent : QColor(dark ? Qt::white : Qt::black);
+            speck.setAlphaF(Clamp01((0.10 + 0.45 * c) * appear * alone * (0.35 + 0.65 * closeness)));
+            p.setBrush(speck);
+            const double r = (1.2 + 2.4 * c) * s;
+            p.drawEllipse(QPointF(x, y), r, r);
+        }
+
+        // Rings leaving the emblem.
+        p.setBrush(Qt::NoBrush);
+        for (int ring = 0; ring < 3; ++ring) {
+            const double rt = (it - 250 - ring * 300) / 1300.0;
+            if (rt <= 0 || rt >= 1) {
+                continue;
+            }
+            QColor colour = accent;
+            colour.setAlphaF(0.55 * (1 - rt) * (1 - rt) * alone);
+            p.setPen(QPen(colour, (3.0 - 2.0 * rt) * s));
+            const double radius = big * 0.62 + EaseOut(rt) * 620 * s;
+            p.drawEllipse(centre, radius, radius);
+        }
+
+        // The name under it, its letters settling together.
+        const double word = EaseOut((it - 550) / 650.0) * Clamp01(1 - merge * 3);
+        if (word > 0) {
+            QFont name_font = Font(font(), 46 * s, QFont::Medium);
+            name_font.setLetterSpacing(QFont::AbsoluteSpacing, (10 + 26 * (1 - word)) * s);
+            QColor colour = text;
+            colour.setAlphaF(word);
+            p.setPen(colour);
+            p.setFont(name_font);
+            p.drawText(QRectF(0, centre.y() + 130 * s, w, 80 * s), Qt::AlignCenter,
+                       QStringLiteral("Notos"));
+        }
+
+        const QRectF big_rect(centre.x() - big / 2, centre.y() - big / 2, big, big);
+        icon_rect = QRectF(big_rect.left() + (badge_rect.left() - big_rect.left()) * merge,
+                           big_rect.top() + (badge_rect.top() - big_rect.top()) * merge,
+                           big_rect.width() + (badge_rect.width() - big_rect.width()) * merge,
+                           big_rect.height() + (badge_rect.height() - big_rect.height()) * merge);
+        p.setOpacity(appear);
+    }
+    const QPixmap icon = window->windowIcon().pixmap(256);
+    p.drawPixmap(icon_rect, icon, QRectF(icon.rect()));
+    p.setOpacity(merge);
     p.setPen(sub);
     p.setFont(Font(font(), 18 * s));
     p.drawText(QRectF(badge_rect.right() + 14 * s, badge_rect.top(), 400 * s, badge),
                Qt::AlignVCenter | Qt::AlignLeft, QStringLiteral("Notos"));
+    p.setOpacity(ui);
     const bool clock24 = Prefs().value(QStringLiteral("clock24")).toBool();
     p.setPen(text);
     p.setFont(Font(font(), ClockSize * s));
@@ -868,21 +1391,48 @@ void Home::paintEvent(QPaintEvent*) {
     tile_rects.assign(games.size(), QRect());
     p.save();
     p.setClipRect(QRectF(0, area_top, w, area_bottom - area_top));
-    for (int i = 0; i < static_cast<int>(games.size()); ++i) {
+    if (focus.size() != games.size()) {
+        focus.assign(games.size(), 0.0);
+    }
+    const auto draw_tile = [&](int i) {
         const double x = left + i * cell - scroll + TileGap * s;
-        if (x + outer < 0 || x > w) {
-            continue;
+        if (x + outer * 1.1 < 0 || x - outer * 0.1 > w) {
+            return;
         }
-        const QRectF outer_rect(x, top + title_h + TileGap * s, outer, outer);
-        tile_rects[i] = outer_rect.toAlignedRect();
-        const bool on = row == 0 && i == game_index;
-        if (on) {
-            p.setPen(QPen(accent, TileBorder * s));
+        const QRectF rest(x, top + title_h + TileGap * s, outer, outer);
+        tile_rects[i] = rest.toAlignedRect();
+        // The selected cover grows a little, from its centre.
+        const double lift = focus[i];
+        const double grown = outer * 0.075 * lift / 2;
+        QRectF outer_rect = rest.adjusted(-grown, -grown, grown, grown);
+        double tile_opacity = ui;
+        if (intro) {
+            // The covers come in from the right, one after the other.
+            const double order = std::max(0.0, (x - left) / cell);
+            const double in = EaseOut((it - IntroUi - order * 85) / 600.0);
+            outer_rect.translate((1 - in) * 180 * s, 0);
+            tile_opacity = in;
+        }
+        p.setOpacity(tile_opacity);
+        const double k = outer_rect.width() / outer; // everything inside scales with it
+        if (lift > 0.01) {
+            // A soft shadow lifts it off the row.
+            p.setPen(Qt::NoPen);
+            for (int layer = 7; layer >= 1; --layer) {
+                const double spread = layer * 3 * s * lift;
+                p.setBrush(QColor(0, 0, 0, static_cast<int>((dark ? 13 : 8) * lift)));
+                p.drawRoundedRect(outer_rect.adjusted(-spread, -spread + 4 * s * lift, spread,
+                                                      spread + 6 * s * lift),
+                                  8 * s, 8 * s);
+            }
+            p.setOpacity(tile_opacity * Clamp01(lift * 1.4));
+            p.setPen(QPen(AccentBrush(outer_rect), TileBorder * s * k));
             p.setBrush(Qt::NoBrush);
-            const double half = TileBorder * s / 2;
+            const double half = TileBorder * s * k / 2;
             p.drawRoundedRect(outer_rect.adjusted(half, half, -half, -half), 4 * s, 4 * s);
+            p.setOpacity(tile_opacity);
         }
-        const double inset = (TileBorder + TilePad) * s;
+        const double inset = (TileBorder + TilePad) * s * k;
         const QRectF face = outer_rect.adjusted(inset, inset, -inset, -inset);
         const Game& game = games[i];
         p.save();
@@ -925,11 +1475,23 @@ void Home::paintEvent(QPaintEvent*) {
         if (!game.native) {
             p.setPen(sub);
             p.setFont(Font(font(), HintSize * s, QFont::Medium));
-            p.drawText(QRectF(outer_rect.left(), outer_rect.bottom() + TileGap * s, outer, label_h),
+            p.drawText(QRectF(outer_rect.left(), outer_rect.bottom() + TileGap * s,
+                              outer_rect.width(), label_h),
                        Qt::AlignHCenter | Qt::AlignTop, QStringLiteral("Emulado"));
         }
+    };
+    // The selected cover last: it grows over its neighbours.
+    const int selected = row == 0 && !games.empty() ? game_index : -1;
+    for (int i = 0; i < static_cast<int>(games.size()); ++i) {
+        if (i != selected) {
+            draw_tile(i);
+        }
+    }
+    if (selected >= 0) {
+        draw_tile(selected);
     }
     p.restore();
+    p.setOpacity(ui);
     if (games.empty()) {
         p.setPen(sub);
         p.setFont(Font(font(), 22 * s));
@@ -941,7 +1503,7 @@ void Home::paintEvent(QPaintEvent*) {
     const double icon_d = IconSize * s;
     const double button_w = icon_d + 82 * s;
     const double buttons_x = (w - button_w * Buttons.size()) / 2;
-    const double buttons_y = area_bottom;
+    const double buttons_y = area_bottom + (1 - ui) * 36 * s; // they rise in with the opening
     button_rects.assign(Buttons.size(), QRect());
     for (int i = 0; i < static_cast<int>(Buttons.size()); ++i) {
         const bool on = row == 1 && i == button_index;
@@ -950,7 +1512,7 @@ void Home::paintEvent(QPaintEvent*) {
         button_rects[i] = QRectF(buttons_x + i * button_w, buttons_y, button_w, icon_d + 34 * s)
                               .toAlignedRect();
         p.setBrush(panel);
-        p.setPen(on ? QPen(accent, 4 * s) : QPen(Qt::NoPen));
+        p.setPen(on ? QPen(AccentBrush(circle), 4 * s) : QPen(Qt::NoPen));
         p.drawEllipse(circle.adjusted(2 * s, 2 * s, -2 * s, -2 * s));
         const int glyph = static_cast<int>(icon_d * 0.42);
         const QPixmap pixmap = FritchiiUi::Glyph(QString::fromLatin1(Buttons[i].icon),
@@ -987,6 +1549,7 @@ void Home::paintEvent(QPaintEvent*) {
     p.drawText(QRectF(36 * s, bar_y, w - 88 * s, BottomBar * s), Qt::AlignVCenter | Qt::AlignRight,
                hint);
 
+    p.setOpacity(1);
     PaintMenu(p, rect());
 }
 
@@ -1118,6 +1681,30 @@ void Home::keyPressEvent(QKeyEvent* event) {
 }
 
 void Home::Nav(const QString& cmd) {
+    if (intro_start >= 0) {
+        // Any press skips the opening.
+        intro_start = -1;
+        update();
+        return;
+    }
+    if (loading) {
+        // Only cancelling while a game loads (not once it shows).
+        if (cmd != QStringLiteral("back") || (!loading_emulated && native_window)) {
+            return;
+        }
+        if (loading_emulated) {
+            EndLoading();
+            hooks.stop();
+            return;
+        }
+        EndLoading();
+#ifdef _WIN32
+        if (native_process) {
+            TerminateProcess(native_process, 1); // nothing to save yet
+        }
+#endif
+        return;
+    }
     if (cmd == QStringLiteral("fullscreen")) {
         SetSetting(QStringLiteral("fullscreen"),
                    !Prefs().value(QStringLiteral("fullscreen")).toBool());
@@ -1194,13 +1781,13 @@ void Home::Select() {
     const double view = width() - 2 * SideMargin * s;
     const double x = game_index * cell;
     const double margin = std::min(80 * s, std::max(0.0, (view - cell) / 2));
-    if (x - scroll < margin) {
-        scroll = x - margin;
-    } else if (x + cell - scroll > view - margin) {
-        scroll = x + cell - view + margin;
+    if (x - scroll_target < margin) {
+        scroll_target = x - margin;
+    } else if (x + cell - scroll_target > view - margin) {
+        scroll_target = x + cell - view + margin;
     }
     const double max_scroll = std::max(0.0, games.size() * cell - view);
-    scroll = std::clamp(scroll, 0.0, max_scroll);
+    scroll_target = std::clamp(scroll_target, 0.0, max_scroll);
     update();
 }
 
@@ -1229,6 +1816,9 @@ void Home::MenuMouse(const QPoint& pos, Qt::MouseButton button) {
 }
 
 void Home::mousePressEvent(QMouseEvent* event) {
+    if (loading) {
+        return;
+    }
     const QPoint pos = event->position().toPoint();
     if (!menu.empty()) {
         MenuMouse(pos, event->button());
@@ -1262,7 +1852,7 @@ void Home::mousePressEvent(QMouseEvent* event) {
 
 void Home::mouseDoubleClickEvent(QMouseEvent* event) {
     const QPoint pos = event->position().toPoint();
-    if (menu.empty() && event->button() == Qt::LeftButton) {
+    if (!loading && menu.empty() && event->button() == Qt::LeftButton) {
         for (int i = 0; i < static_cast<int>(tile_rects.size()); ++i) {
             if (tile_rects[i].contains(pos)) {
                 game_index = i;
@@ -1275,7 +1865,7 @@ void Home::mouseDoubleClickEvent(QMouseEvent* event) {
 }
 
 void Home::wheelEvent(QWheelEvent* event) {
-    if (!menu.empty() || games.empty()) {
+    if (loading || !menu.empty() || games.empty()) {
         return;
     }
     const int steps = event->angleDelta().y() != 0 ? event->angleDelta().y() : event->angleDelta().x();
@@ -1365,10 +1955,21 @@ void Home::PollPad() {
 // ---- launching
 
 void Home::Launch(const Game& game) {
+    if (loading) {
+        return;
+    }
     if (game.native) {
         LaunchNative(game);
-    } else {
-        hooks.play(game.path, game.program_id);
+        return;
+    }
+    if (hooks.set_game_fullscreen) {
+        hooks.set_game_fullscreen(GamesFullscreen());
+    }
+    // OnEmulationStarting shows the loading screen for it (the boot may also fail first).
+    loading_game = game;
+    hooks.play(game.path, game.program_id);
+    if (!loading) {
+        loading_game = {};
     }
 }
 
@@ -1416,14 +2017,31 @@ void Home::LaunchNative(const Game& game) {
     native_process = process.hProcess;
     native_exe = game.exe;
     native_name = game.name;
+    native_window = nullptr;
+    native_ping_out = false;
+    native_ready = false;
     native_timer->start();
-    window->showMinimized();
+    // The loading screen until the game's window shows (LoadingTick).
+    CloseMenu();
+    loading = true;
+    loading_emulated = false;
+    loading_game = game;
+    loading_phase = 0;
+    loading_progress = -1;
+    loading_status = QStringLiteral("Iniciando…");
+    launch_time = QDateTime::currentDateTime();
+    loading_timer->start();
+    update();
 #else
     Message(QStringLiteral("Los juegos nativos solo se abren en Windows."));
 #endif
 }
 
 void Home::NativeEnded() {
+    if (loading && !loading_emulated) {
+        EndLoading();
+    }
+    native_window = nullptr;
     if (native_menu && overlay->isVisible()) {
         LeaveGameMenu(false);
     }
@@ -1502,7 +2120,7 @@ void Home::SettingsMenu() {
         return value ? QStringLiteral("Sí") : QStringLiteral("No");
     };
     const auto accent_step = [this](int d) {
-        const QString current = Accent().name(QColor::HexRgb).toUpper();
+        const QString current = Prefs().value(QStringLiteral("accent")).toString().toUpper();
         int at = 0;
         for (int i = 0; i < static_cast<int>(Accents.size()); ++i) {
             if (current == QString::fromLatin1(Accents[i].second).toUpper()) {
@@ -1535,7 +2153,8 @@ void Home::SettingsMenu() {
                   },
                   false},
             Entry{[this]() -> QString {
-                      const QString current = Accent().name(QColor::HexRgb).toUpper();
+                      const QString current =
+                          Prefs().value(QStringLiteral("accent")).toString().toUpper();
                       for (const auto& [name, hex] : Accents) {
                           if (current == QString::fromLatin1(hex).toUpper()) {
                               return QStringLiteral("Color: ") + QString::fromUtf8(name);
@@ -1552,6 +2171,13 @@ void Home::SettingsMenu() {
                   },
                   {},
                   toggle("fullscreen"),
+                  false},
+            Entry{[this, yes_no] {
+                      return QStringLiteral("Juegos en pantalla completa: ") +
+                             yes_no(GamesFullscreen());
+                  },
+                  {},
+                  toggle("gamesFullscreen"),
                   false},
             Entry{[this] {
                       return QStringLiteral("Reloj: ") +

@@ -18,6 +18,9 @@
 #include "yuzu/fritchii/game_controls.h"
 #include "hid_core/frontend/emulated_controller.h"
 #include "hid_core/hid_core.h"
+#include "qt_common/render/emu_thread.h"
+#include "video_core/rasterizer_interface.h"
+#include "yuzu/loading_screen.h"
 #include "yuzu/fritchii/saves_window.h"
 #include "yuzu/notos/notos_home.h"
 #include "yuzu/fritchii/precompile_gate.h"
@@ -160,11 +163,30 @@ void MainWindow::SetUpFritchiiUi() {
         .game_config = [this] { ui->action_Configure_Current_Game->trigger(); },
         .toggle_fullscreen = [this] { ui->action_Fullscreen->trigger(); },
         .fullscreen = [this] { return ui->action_Fullscreen->isChecked(); },
+        .set_game_fullscreen =
+            [this](bool on) {
+                if (!emulation_running) {
+                    ui->action_Fullscreen->setChecked(on);
+                }
+            },
     };
     // Notos: the launcher-style home screen in place of Fritchii's (FritchiiUi::Home).
     auto* notos_home = new Notos::Home(this, ui->horizontalLayout, game_list,
                                        game_list_placeholder, std::move(home));
     connect(this, &MainWindow::EmulationStarting, notos_home, &Notos::Home::OnEmulationStarting);
+    // Its loading screen follows the emulator's: shader progress, then gone with it.
+    connect(this, &MainWindow::EmulationStarting, notos_home, [notos_home] {
+        if (QtCommon::emu_thread) {
+            connect(
+                QtCommon::emu_thread.get(), &EmuThread::LoadProgress, notos_home,
+                [notos_home](VideoCore::LoadCallbackStage stage, std::size_t value,
+                             std::size_t total) {
+                    notos_home->OnLoadProgress(static_cast<int>(stage), value, total);
+                },
+                Qt::QueuedConnection);
+        }
+    });
+    connect(loading_screen, &LoadingScreen::Hidden, notos_home, &Notos::Home::OnLoadFinished);
     connect(this, &MainWindow::EmulationStopping, notos_home, &Notos::Home::OnEmulationStopping);
 
     // In-game controls: the menu bar is gone and the rail steps aside while a game runs.
