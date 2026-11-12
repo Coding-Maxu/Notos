@@ -53,6 +53,9 @@ struct HomeHooks {
     std::function<void()> game_config;    ///< the running game's own settings
     std::function<void()> toggle_fullscreen;
     std::function<bool()> fullscreen;
+    /// The emulator's game folder a game file is listed from (empty: none), and removing it.
+    std::function<QString(const QString& path)> game_dir_of;
+    std::function<void(const QString& folder)> remove_game_dir;
     /// Whether the next game starts in fullscreen (the emulator's Fullscreen action, unchecked
     /// without a game).
     std::function<void(bool)> set_game_fullscreen;
@@ -218,6 +221,16 @@ private:
     double scroll = 0;
     bool list_mode = false;
     QString pad_name; ///< shown next to the clock
+    bool pad_last = false; ///< the last input came from the gamepad: hints show its buttons
+    struct Hint {
+        QString key;   ///< keyboard
+        QString pad;   ///< gamepad
+        QString label;
+    };
+    /// Hints as buttons (a circle for the gamepad's, a key cap for the keyboard's) then what
+    /// they do, aligned in `area`.
+    void PaintHints(QPainter& p, const std::vector<Hint>& hints, const QRectF& area,
+                    Qt::Alignment align, double px, const QColor& colour) const;
     // Closing a game: the closing screen shows until the game is gone.
     bool closing = false;
     bool closing_emulated = false;

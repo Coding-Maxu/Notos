@@ -410,7 +410,7 @@ QJsonObject Home::Prefs() const {
         }
     };
     fallback("theme", QStringLiteral("dark"));
-    fallback("accent", QString::fromLatin1(Accents[0].second));
+    fallback("accent", QStringLiteral("rainbow"));
     fallback("fullscreen", true);
     fallback("gamesFullscreen", true);
     fallback("clock24", true);
@@ -1055,9 +1055,9 @@ void Home::PaintLoading(QPainter& p, const QRect& area) {
         return;
     }
     // How to cancel.
-    p.setFont(Font(font(), HintSize * s));
-    p.drawText(QRectF(0, h - BottomBar * s, w - SideMargin * s, BottomBar * s),
-               Qt::AlignRight | Qt::AlignVCenter, QStringLiteral("○ / Esc  Cancelar"));
+    PaintHints(p, {{QStringLiteral("Esc"), QStringLiteral("○"), QStringLiteral("Cancelar")}},
+               QRectF(0, h - BottomBar * s, w - SideMargin * s, BottomBar * s), Qt::AlignRight,
+               HintSize * 0.85 * s, sub);
     p.restore();
 }
 
@@ -1083,6 +1083,7 @@ void Overlay::paintEvent(QPaintEvent*) {
 }
 
 void Overlay::keyPressEvent(QKeyEvent* event) {
+    home->pad_last = false;
     if (event->key() == Qt::Key_Home) {
         home->ToggleGameMenu();
         return;
@@ -1413,6 +1414,7 @@ bool Home::eventFilter(QObject* watched, QEvent* event) {
         }
         if (event->type() == QEvent::KeyPress) {
             const auto* key = static_cast<QKeyEvent*>(event);
+            pad_last = false;
             if (key->key() == Qt::Key_Home) {
                 if (!key->isAutoRepeat()) {
                     ToggleGameMenu();
@@ -1767,20 +1769,21 @@ void Home::paintEvent(QPaintEvent*) {
     const double bar_y = h - BottomBar * s;
     p.setPen(QPen(sub, 1));
     p.drawLine(QPointF(36 * s, bar_y), QPointF(w - 36 * s, bar_y));
-    const QString gap = QStringLiteral("        ");
-    QString hint;
+    std::vector<Hint> hints;
+    const Hint accept{QStringLiteral("Enter"), QStringLiteral("✕"), QStringLiteral("Aceptar")};
     if (!menu.empty()) {
-        hint = QStringLiteral("Enter / ✕  Aceptar") + gap + QStringLiteral("Esc / ○  Volver");
+        hints = {accept, {QStringLiteral("Esc"), QStringLiteral("○"), QStringLiteral("Volver")}};
     } else if (row == 0) {
-        hint = QStringLiteral("Enter / ✕  Jugar") + gap + QStringLiteral("Tab / △  Opciones") + gap +
-               QStringLiteral("F11  Pantalla completa");
+        hints = {{QStringLiteral("Enter"), QStringLiteral("✕"), QStringLiteral("Jugar")},
+                 {QStringLiteral("Tab"), QStringLiteral("△"), QStringLiteral("Opciones")}};
     } else {
-        hint = QStringLiteral("Enter / ✕  Aceptar") + gap + QStringLiteral("F11  Pantalla completa");
+        hints = {accept};
     }
-    p.setPen(text);
-    p.setFont(Font(font(), HintSize * 0.8 * s));
-    p.drawText(QRectF(36 * s, bar_y, w - 88 * s, BottomBar * s), Qt::AlignVCenter | Qt::AlignRight,
-               hint);
+    if (!pad_last && menu.empty()) {
+        hints.push_back({QStringLiteral("F11"), {}, QStringLiteral("Pantalla completa")});
+    }
+    PaintHints(p, hints, QRectF(36 * s, bar_y, w - 88 * s, BottomBar * s), Qt::AlignRight,
+               HintSize * 0.8 * s, text);
 
     p.setOpacity(1);
     PaintMenu(p, rect());
@@ -1936,13 +1939,81 @@ void Home::PaintMenu(QPainter& p, const QRect& area) {
     }
 
     // Under the card: what the buttons do here.
-    QString hint = QStringLiteral("Enter / ✕  Aceptar        Esc / ○  Volver");
+    std::vector<Hint> hints;
     if (menu[menu_index].adjust) {
-        hint = QStringLiteral("◀ ▶  Cambiar        ") + hint;
+        hints.push_back({QStringLiteral("◀ ▶"), QStringLiteral("◀ ▶"), QStringLiteral("Cambiar")});
     }
-    p.setPen(QColor(255, 255, 255, 170));
-    p.setFont(Font(font(), HintSize * 0.72 * s));
-    p.drawText(QRectF(box.left(), box.bottom() + 18 * s, menu_w, 30 * s), Qt::AlignCenter, hint);
+    hints.push_back({QStringLiteral("Enter"), QStringLiteral("✕"), QStringLiteral("Aceptar")});
+    hints.push_back({QStringLiteral("Esc"), QStringLiteral("○"), QStringLiteral("Volver")});
+    PaintHints(p, hints, QRectF(box.left() - 200 * s, box.bottom() + 16 * s, menu_w + 400 * s, 34 * s),
+               Qt::AlignHCenter, HintSize * 0.72 * s, QColor(255, 255, 255, 200));
+    p.restore();
+}
+
+void Home::PaintHints(QPainter& p, const std::vector<Hint>& hints, const QRectF& area,
+                      Qt::Alignment align, double px, const QColor& colour) const {
+    const QFont label_font = Font(font(), px);
+    const QFont key_font = Font(font(), px * 0.78, QFont::DemiBold);
+    const QFont glyph_font = Font(font(), px * 0.86, QFont::DemiBold);
+    const QFontMetricsF label_metrics(label_font);
+    const double cap_h = px * 1.55;
+    const double inner_gap = px * 0.45;
+    const double outer_gap = px * 1.6;
+
+    struct Laid {
+        QString cap;
+        bool round;
+        double cap_w;
+        QString label;
+        double label_w;
+    };
+    std::vector<Laid> laid;
+    double total = 0;
+    for (const Hint& hint : hints) {
+        const QString cap = pad_last ? hint.pad : hint.key;
+        if (cap.isEmpty()) {
+            continue;
+        }
+        // A gamepad button is a circle (a pill for the arrows); a key is a key cap.
+        const bool round = pad_last;
+        const QFontMetricsF cap_metrics(round ? glyph_font : key_font);
+        const double cap_w = std::max(cap_h, cap_metrics.horizontalAdvance(cap) + px * (round ? 0.8 : 0.9));
+        const double label_w = label_metrics.horizontalAdvance(hint.label);
+        laid.push_back({cap, round, cap_w, hint.label, label_w});
+        total += (laid.empty() ? 0 : 0) + cap_w + inner_gap + label_w;
+    }
+    if (laid.empty()) {
+        return;
+    }
+    total += outer_gap * (laid.size() - 1);
+    double x = area.left();
+    if (align & Qt::AlignRight) {
+        x = area.right() - total;
+    } else if (align & Qt::AlignHCenter) {
+        x = area.center().x() - total / 2;
+    }
+    const double mid = area.center().y();
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing);
+    for (const Laid& item : laid) {
+        const QRectF cap(x, mid - cap_h / 2, item.cap_w, cap_h);
+        QColor ring = colour;
+        ring.setAlphaF(colour.alphaF() * 0.75);
+        QColor fill = colour;
+        fill.setAlphaF(colour.alphaF() * 0.10);
+        p.setPen(QPen(ring, std::max(1.0, px * 0.08)));
+        p.setBrush(fill);
+        const double radius = item.round ? cap_h / 2 : px * 0.28;
+        p.drawRoundedRect(cap.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius);
+        p.setPen(colour);
+        p.setFont(item.round ? glyph_font : key_font);
+        p.drawText(cap, Qt::AlignCenter, item.cap);
+        x += item.cap_w + inner_gap;
+        p.setFont(label_font);
+        p.drawText(QRectF(x, area.top(), item.label_w + 2, area.height()),
+                   Qt::AlignVCenter | Qt::AlignLeft, item.label);
+        x += item.label_w + outer_gap;
+    }
     p.restore();
 }
 
@@ -1999,6 +2070,7 @@ QString Home::KeyCommand(int key) const {
 }
 
 void Home::keyPressEvent(QKeyEvent* event) {
+    pad_last = false;
     const QString cmd = KeyCommand(event->key());
     if (cmd.isEmpty()) {
         QWidget::keyPressEvent(event);
@@ -2148,6 +2220,7 @@ void Home::MenuMouse(const QPoint& pos, Qt::MouseButton button) {
 }
 
 void Home::mousePressEvent(QMouseEvent* event) {
+    pad_last = false;
     if (loading) {
         return;
     }
@@ -2216,6 +2289,11 @@ void Home::PollPad() {
     }
     const u64 buttons = static_cast<u64>(controller->GetNpadButtons().raw);
     const u64 pressed = buttons & ~pad_held;
+    if (pressed != 0 && !pad_last) {
+        pad_last = true; // the hints show the gamepad's buttons
+        update();
+        overlay->update();
+    }
     pad_held = buttons;
 
     // Home pressed and let go on its own opens or closes the Home menu during a game; Home with
@@ -2592,6 +2670,47 @@ void Home::GameMenu() {
         entries.push_back(Entry{[] { return QStringLiteral("Borrar caché de shaders"); },
                                 [this, game] { hooks.delete_shader_cache(game.program_id); }, {},
                                 true});
+        const QString folder = hooks.game_dir_of ? hooks.game_dir_of(game.path) : QString{};
+        if (!folder.isEmpty()) {
+            entries.push_back(Entry{
+                [] { return QStringLiteral("Borrar juego"); },
+                [this, game, folder] {
+                    // Its folder leaves the emulator's list (the file stays on disk); other games
+                    // listed from the same folder go with it, so the question names them.
+                    int others = 0;
+                    for (const Game& other : games) {
+                        if (!other.native && other.path != game.path &&
+                            QDir::cleanPath(other.path).startsWith(folder + QLatin1Char('/'), Qt::CaseInsensitive)) {
+                            ++others;
+                        }
+                    }
+                    QString question = QStringLiteral("¿Borrar %1 de la lista? El archivo queda "
+                                                      "en tu disco.")
+                                           .arg(game.name);
+                    if (others > 0) {
+                        question += QStringLiteral(" Se quita la carpeta %1 y con ella %2 juego%3 "
+                                                   "más.")
+                                        .arg(QDir::toNativeSeparators(folder))
+                                        .arg(others)
+                                        .arg(others == 1 ? QString() : QStringLiteral("s"));
+                    }
+                    OpenMenu(question,
+                             {Entry{[] { return QStringLiteral("No"); }, [] {}, {}, true},
+                              Entry{[] { return QStringLiteral("Sí, borrar"); },
+                                    [this, game, folder] {
+                                        QJsonObject covers =
+                                            config.value(QStringLiteral("covers")).toObject();
+                                        covers.remove(game.path);
+                                        config.insert(QStringLiteral("covers"), covers);
+                                        SaveConfig();
+                                        hooks.remove_game_dir(folder);
+                                    },
+                                    {},
+                                    true}});
+                },
+                {},
+                false});
+        }
     }
     OpenMenu(game.name, std::move(entries));
 }

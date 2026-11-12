@@ -4,6 +4,8 @@
 // once at the end of the constructor and does nothing in a Lichii build.
 
 #include <QApplication>
+#include <QDir>
+#include <QFileInfo>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QStatusBar>
@@ -163,6 +165,38 @@ void MainWindow::SetUpFritchiiUi() {
         .game_config = [this] { ui->action_Configure_Current_Game->trigger(); },
         .toggle_fullscreen = [this] { ui->action_Fullscreen->trigger(); },
         .fullscreen = [this] { return ui->action_Fullscreen->isChecked(); },
+        .game_dir_of =
+            [](const QString& path) {
+                // The emulator's game folder holding the file: the deepest one that contains it.
+                const QString file = QDir::cleanPath(QFileInfo(path).absoluteFilePath());
+                QString best;
+                for (const UISettings::GameDir& dir : UISettings::values.game_dirs) {
+                    const QString folder = QDir::cleanPath(QString::fromStdString(dir.path));
+                    if (folder == QStringLiteral("SDMC") || folder == QStringLiteral("UserNAND") ||
+                        folder == QStringLiteral("SysNAND")) {
+                        continue;
+                    }
+                    if (file.startsWith(folder + QLatin1Char('/'), Qt::CaseInsensitive) &&
+                        folder.size() > best.size()) {
+                        best = folder;
+                    }
+                }
+                return best;
+            },
+        .remove_game_dir =
+            [this](const QString& folder) {
+                // As the game list's "Remove Game Directory".
+                auto& dirs = UISettings::values.game_dirs;
+                for (int i = 0; i < dirs.size(); ++i) {
+                    if (QDir::cleanPath(QString::fromStdString(dirs[i].path))
+                            .compare(folder, Qt::CaseInsensitive) == 0) {
+                        dirs.removeAt(i);
+                        break;
+                    }
+                }
+                game_list->PopulateAsync(dirs);
+                OnSaveConfig();
+            },
         .set_game_fullscreen =
             [this](bool on) {
                 if (!emulation_running) {
