@@ -18,12 +18,10 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <list>
 #include <map>
 #include <vector>
 
 #include <QDir>
-#include <QElapsedTimer>
 #include <QFileInfo>
 
 #include "common/logging.h"
@@ -38,7 +36,11 @@ struct Clip {
     WORD channels = 0;
     DWORD rate = 0;
     std::vector<int16_t> pcm;
-    qint64 last_played = -1000;
+    // Each clip keeps its own output open: a press starts it at once, and again restarts it.
+    HWAVEOUT out = nullptr;
+    WAVEHDR header{};
+    std::vector<int16_t> data; ///< pcm at the volume
+    bool queued = false;
 };
 
 template <typename T>
@@ -108,45 +110,75 @@ bool Decode(const QString& path, Clip& clip) {
 } // namespace
 
 struct Sounds::Impl {
-    struct Voice {
-        QString name;
-        HWAVEOUT out = nullptr;
-        WAVEHDR header{};
-        std::vector<int16_t> data;
-    };
-
     std::map<QString, Clip> clips;
-    std::list<Voice> voices;
     bool enabled = true;
     int volume = 70;
     bool started = false;
-    QElapsedTimer clock;
 
-    /// Closes the voices that are done (or all of them).
-    void Reap(bool all, const QString& name = {}) {
-        for (auto it = voices.begin(); it != voices.end();) {
-            const bool stop = all || (!name.isEmpty() && it->name == name);
-            if (stop) {
-                waveOutReset(it->out);
-            }
-            if (stop || (it->header.dwFlags & WHDR_DONE)) {
-                waveOutUnprepareHeader(it->out, &it->header, sizeof(it->header));
-                waveOutClose(it->out);
-                it = voices.erase(it);
-            } else {
-                ++it;
-            }
+    static void Halt(Clip& clip) {
+        if (clip.out && clip.queued) {
+            waveOutReset(clip.out);
+            clip.queued = false;
         }
+    }
+
+    void Scale(Clip& clip) const {
+        // Perceived loudness: the slider's square.
+        const double gain = (volume / 100.0) * (volume / 100.0);
+        std::transform(clip.pcm.begin(), clip.pcm.end(), clip.data.begin(),
+                       [gain](int16_t s) { return static_cast<int16_t>(s * gain); });
+    }
+
+    bool Open(Clip& clip) {
+        // A clip a few frames long can be lost while the output starts: some silence after it.
+        const size_t min_samples = static_cast<size_t>(clip.rate) * clip.channels / 8;
+        if (clip.pcm.size() < min_samples) {
+            clip.pcm.resize(min_samples, 0);
+        }
+        clip.data.resize(clip.pcm.size());
+        Scale(clip);
+        WAVEFORMATEX format{};
+        format.wFormatTag = WAVE_FORMAT_PCM;
+        format.nChannels = clip.channels;
+        format.nSamplesPerSec = clip.rate;
+        format.wBitsPerSample = 16;
+        format.nBlockAlign = static_cast<WORD>(clip.channels * 2);
+        format.nAvgBytesPerSec = clip.rate * format.nBlockAlign;
+        if (waveOutOpen(&clip.out, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL) !=
+            MMSYSERR_NOERROR) {
+            clip.out = nullptr;
+            return false;
+        }
+        clip.header.lpData = reinterpret_cast<LPSTR>(clip.data.data());
+        clip.header.dwBufferLength = static_cast<DWORD>(clip.data.size() * 2);
+        if (waveOutPrepareHeader(clip.out, &clip.header, sizeof(clip.header)) !=
+            MMSYSERR_NOERROR) {
+            waveOutClose(clip.out);
+            clip.out = nullptr;
+            return false;
+        }
+        return true;
+    }
+
+    void Close(Clip& clip) {
+        if (!clip.out) {
+            return;
+        }
+        Halt(clip);
+        waveOutUnprepareHeader(clip.out, &clip.header, sizeof(clip.header));
+        waveOutClose(clip.out);
+        clip.out = nullptr;
     }
 };
 
 Sounds::Sounds() : impl{std::make_unique<Impl>()} {
     impl->started = SUCCEEDED(MFStartup(MF_VERSION, MFSTARTUP_LITE));
-    impl->clock.start();
 }
 
 Sounds::~Sounds() {
-    impl->Reap(true);
+    for (auto& [name, clip] : impl->clips) {
+        impl->Close(clip);
+    }
     if (impl->started) {
         MFShutdown();
     }
@@ -163,77 +195,62 @@ void Sounds::Load(const QString& dir) {
             continue;
         }
         Clip clip;
-        if (Decode(file.absoluteFilePath(), clip)) {
-            impl->clips.emplace(name, std::move(clip));
-        } else {
+        if (!Decode(file.absoluteFilePath(), clip)) {
             LOG_WARNING(Frontend, "Notos: can't decode sound {}",
                         file.absoluteFilePath().toStdString());
+            continue;
+        }
+        LOG_INFO(Frontend, "Notos: sound {} ({} ms, {} Hz, {} ch)", name.toStdString(),
+                 clip.pcm.size() * 1000 / (static_cast<size_t>(clip.rate) * clip.channels),
+                 clip.rate, clip.channels);
+        Clip& kept = impl->clips.emplace(name, std::move(clip)).first->second;
+        if (!impl->Open(kept)) {
+            LOG_WARNING(Frontend, "Notos: can't open an output for sound {}", name.toStdString());
         }
     }
 }
 
 void Sounds::Play(const QString& name) {
-    impl->Reap(false);
     if (!impl->enabled || impl->volume <= 0) {
         return;
     }
     const auto found = impl->clips.find(name);
-    if (found == impl->clips.end()) {
+    if (found == impl->clips.end() || !found->second.out) {
         return;
     }
     Clip& clip = found->second;
-    // One action can pass through several places that sound (a menu closing into another).
-    const qint64 now = impl->clock.elapsed();
-    if (now - clip.last_played < 60) {
-        return;
-    }
-    clip.last_played = now;
-
-    Impl::Voice& voice = impl->voices.emplace_back();
-    voice.name = name;
-    voice.data.resize(clip.pcm.size());
-    // Perceived loudness: the slider's square.
-    const double gain = (impl->volume / 100.0) * (impl->volume / 100.0);
-    std::transform(clip.pcm.begin(), clip.pcm.end(), voice.data.begin(),
-                   [gain](int16_t s) { return static_cast<int16_t>(s * gain); });
-    WAVEFORMATEX format{};
-    format.wFormatTag = WAVE_FORMAT_PCM;
-    format.nChannels = clip.channels;
-    format.nSamplesPerSec = clip.rate;
-    format.wBitsPerSample = 16;
-    format.nBlockAlign = static_cast<WORD>(clip.channels * 2);
-    format.nAvgBytesPerSec = clip.rate * format.nBlockAlign;
-    if (waveOutOpen(&voice.out, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
-        impl->voices.pop_back();
-        return;
-    }
-    voice.header.lpData = reinterpret_cast<LPSTR>(voice.data.data());
-    voice.header.dwBufferLength = static_cast<DWORD>(voice.data.size() * 2);
-    if (waveOutPrepareHeader(voice.out, &voice.header, sizeof(voice.header)) != MMSYSERR_NOERROR ||
-        waveOutWrite(voice.out, &voice.header, sizeof(voice.header)) != MMSYSERR_NOERROR) {
-        waveOutUnprepareHeader(voice.out, &voice.header, sizeof(voice.header));
-        waveOutClose(voice.out);
-        impl->voices.pop_back();
+    Impl::Halt(clip); // playing already: from the start
+    if (waveOutWrite(clip.out, &clip.header, sizeof(clip.header)) == MMSYSERR_NOERROR) {
+        clip.queued = true;
     }
 }
 
 void Sounds::Stop(const QString& name) {
-    impl->Reap(false, name);
+    const auto found = impl->clips.find(name);
+    if (found != impl->clips.end()) {
+        Impl::Halt(found->second);
+    }
 }
 
 void Sounds::StopAll() {
-    impl->Reap(true);
+    for (auto& [name, clip] : impl->clips) {
+        Impl::Halt(clip);
+    }
 }
 
 void Sounds::SetEnabled(bool enabled) {
     impl->enabled = enabled;
     if (!enabled) {
-        impl->Reap(true);
+        StopAll();
     }
 }
 
 void Sounds::SetVolume(int percent) {
     impl->volume = std::clamp(percent, 0, 100);
+    for (auto& [name, clip] : impl->clips) {
+        Impl::Halt(clip);
+        impl->Scale(clip);
+    }
 }
 
 #else
