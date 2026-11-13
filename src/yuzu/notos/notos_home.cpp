@@ -52,6 +52,7 @@
 #include <QStatusBar>
 #include <QTime>
 #include <QTimer>
+#include <QWindow>
 
 #include <SDL3/SDL.h>
 
@@ -469,6 +470,7 @@ Home::Home(QMainWindow* window_, QBoxLayout* central, QWidget* game_list_, QWidg
 #endif
 
     QTimer::singleShot(0, this, [this, start_fullscreen] {
+        MoveToLastScreen();
         Restore();
         if (Prefs().value(QStringLiteral("fullscreen")).toBool()) {
             ApplyFullscreen();
@@ -487,6 +489,54 @@ Home::Home(QMainWindow* window_, QBoxLayout* central, QWidget* game_list_, QWidg
 }
 
 // ---- data
+
+void Home::MoveToLastScreen() {
+    // The monitor Notos was on last (Qt names it by its model): the same one where it was, else
+    // that model elsewhere, else whichever monitor is there now.
+    const QJsonObject saved = config.value(QStringLiteral("screen")).toObject();
+    const QString name = saved.value(QStringLiteral("name")).toString();
+    const QPoint origin{saved.value(QStringLiteral("x")).toInt(),
+                        saved.value(QStringLiteral("y")).toInt()};
+    QScreen* target = nullptr;
+    int best = 0;
+    if (!name.isEmpty()) {
+        for (QScreen* screen : QGuiApplication::screens()) {
+            const int score = (screen->name() == name ? 2 : 0) +
+                              (screen->geometry().topLeft() == origin ? 1 : 0);
+            if (score > best) {
+                best = score;
+                target = screen;
+            }
+        }
+    }
+    QWindow* handle = window->windowHandle();
+    if (!handle) {
+        window->winId();
+        handle = window->windowHandle();
+    }
+    if (target && handle && handle->screen() != target) {
+        // The window keeps its size, centred on that monitor; fullscreen then fills it.
+        const QRect area = target->availableGeometry();
+        QRect frame = window->geometry();
+        frame.setSize(frame.size().boundedTo(area.size()));
+        frame.moveCenter(area.center());
+        handle->setScreen(target);
+        window->setGeometry(frame);
+    }
+    if (handle) {
+        // From now on, remembered whenever Notos changes monitor (dragged, or Win+Shift+arrow).
+        connect(handle, &QWindow::screenChanged, this, [this](QScreen* screen) {
+            if (!screen) {
+                return;
+            }
+            config.insert(QStringLiteral("screen"),
+                          QJsonObject{{QStringLiteral("name"), screen->name()},
+                                      {QStringLiteral("x"), screen->geometry().x()},
+                                      {QStringLiteral("y"), screen->geometry().y()}});
+            SaveConfig();
+        });
+    }
+}
 
 void Home::LoadConfig() {
     QFile file(ConfigPath());

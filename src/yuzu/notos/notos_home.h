@@ -186,6 +186,8 @@ private:
 
     // Data
     void LoadConfig();
+    /// At start: back on the monitor Notos was last on, which is remembered from then on.
+    void MoveToLastScreen();
     void SaveConfig();
     void Refresh();
     QString CoverFor(const QString& key) const;
