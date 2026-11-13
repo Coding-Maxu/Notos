@@ -73,6 +73,8 @@ struct HomeHooks {
     /// Multiplayer rooms: 0 public lobby, 1 create, 2 direct connect, 3 current room, 4 leave.
     std::function<void(int action)> multiplayer;
     std::function<bool()> in_room;
+    std::function<void()> check_updates; ///< asks GitHub now; the answer comes back as a notice
+    std::function<QString()> version;     ///< "1", "1.2"...
 };
 
 class Home;
@@ -109,6 +111,14 @@ public:
 
     /// The Home menu over the running game: opens it (pausing the game) or closes it (resuming).
     void ToggleGameMenu();
+
+    /// Nothing else is on screen: the opening is over, no menu, game or loading screen.
+    bool Idle() const;
+    /// "Notos vN está disponible": update now, later, or skip this version.
+    void OfferUpdate(const QString& version, std::function<void()> install,
+                     std::function<void()> later, std::function<void()> skip);
+    /// A message with an Aceptar button.
+    void Notice(const QString& text);
 
     /// The emulator's shader loading at boot (stage 0 prepare, 1 build, 2 complete).
     void OnLoadProgress(int stage, qulonglong value, qulonglong total);

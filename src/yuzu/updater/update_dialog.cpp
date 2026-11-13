@@ -45,7 +45,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr wchar_t ExeName[] = L"lichii.exe";
+constexpr wchar_t ExeName[] = L"Notos.exe";
 // Set for a restarted process to a note it shows once it is up, such as "v5 is installed".
 constexpr char RestartNoteVariable[] = "LICHII_UPDATE_NOTE";
 
@@ -87,7 +87,7 @@ std::string PathText(const fs::path& path) {
 
 QString FritchiiName(const QString& version) {
     return version.isEmpty() ? QCoreApplication::translate("UpdateDialog", "the previous version")
-                             : QStringLiteral("Fritchii v%1").arg(version);
+                             : QStringLiteral("Notos v%1").arg(version);
 }
 
 std::string RunningVersionText() {
@@ -144,7 +144,7 @@ UpdateDialog::UpdateDialog(const Common::Net::Release& release,
         ui->version->setText(
             FritchiiUi::Enabled()
                 ? tr("%1 is ready").arg(QString::fromStdString(release.title))
-                : tr("%1 is available. You have Fritchii v%2.")
+                : tr("%1 is available. You have Notos v%2.")
                       .arg(QString::fromStdString(release.title),
                            QString::fromStdString(RunningVersionText())));
         auto* install = ui->buttonBox->button(QDialogButtonBox::Yes);
@@ -160,7 +160,7 @@ UpdateDialog::UpdateDialog(const Common::Net::Release& release,
         }
         install->setText(tr("Install"));
         ui->label_2->setText(Updater::CanInstallInPlace()
-                                 ? tr("Fritchii will download the update, install it and restart. "
+                                 ? tr("Notos will download the update, install it and restart. "
                                       "Your settings, saves and keys are not changed.")
                                  : tr("Would you like to download this update?"));
         connect(this, &QDialog::accepted, this, &UpdateDialog::Download);
@@ -211,6 +211,15 @@ UpdateDialog::~UpdateDialog() {
     delete ui;
 }
 
+void UpdateDialog::Install() {
+    if (!m_fritchii || m_asset.sha256.empty()) {
+        // Nothing to verify the download against: the release page instead.
+        QDesktopServices::openUrl(QUrl{QString::fromStdString(m_release.html_url)});
+        return;
+    }
+    Download();
+}
+
 void UpdateDialog::Download() {
 #ifdef _WIN32
     if (m_fritchii && Updater::CanInstallInPlace()) {
@@ -221,9 +230,9 @@ void UpdateDialog::Download() {
         LOG_WARNING(Frontend, "Cannot write to {}, downloading the update instead",
                     PathText(InstallDir()));
         Notify(parentWidget(), QMessageBox::Information, tr("Update Needs to Be Installed by Hand"),
-               tr("Fritchii can't write to its folder (%1), so it can't update itself there. The "
+               tr("Notos can't write to its folder (%1), so it can't update itself there. The "
                   "update will be downloaded instead: unzip it and copy its contents over your "
-                  "Fritchii folder, or move Fritchii to a folder you can write to, such as "
+                  "Notos folder, or move Notos to a folder you can write to, such as "
                   "Documents.")
                    .arg(QDir::toNativeSeparators(QString::fromStdWString(InstallDir().wstring()))));
     }
@@ -263,13 +272,13 @@ void UpdateDialog::InstallInPlace() {
     const auto install_dir = InstallDir();
     const UpdateInstaller::Lock lock{install_dir / UpdateInstaller::LockName};
     if (!lock.Held()) {
-        Notify(parentWidget(), QMessageBox::Critical, tr("Failed to install the update"),
-               tr("Another Fritchii window is already updating this folder."));
+        Notify(parentWidget(), QMessageBox::Critical, tr("No se pudo instalar la actualización"),
+               tr("Otra ventana de Notos ya está actualizando esta carpeta."));
         return;
     }
     if (fs::exists(install_dir / UpdateInstaller::JournalName)) {
-        Notify(parentWidget(), QMessageBox::Critical, tr("Failed to install the update"),
-               tr("An earlier update is unfinished. Start Fritchii again to "
+        Notify(parentWidget(), QMessageBox::Critical, tr("No se pudo instalar la actualización"),
+               tr("An earlier update is unfinished. Start Notos again to "
                   "finish it first."));
         return;
     }
@@ -279,7 +288,7 @@ void UpdateDialog::InstallInPlace() {
     const auto unpacked = staging / "unpacked";
     const auto fail = [&](const QString& text) {
         UpdateInstaller::CleanStaging(install_dir);
-        Notify(parentWidget(), QMessageBox::Critical, tr("Failed to install the update"), text);
+        Notify(parentWidget(), QMessageBox::Critical, tr("No se pudo instalar la actualización"), text);
     };
 
     UpdateInstaller::CleanStaging(install_dir);
@@ -295,7 +304,7 @@ void UpdateDialog::InstallInPlace() {
         return;
     }
 
-    auto progress = QtCommon::Frontend::newProgressDialog(tr("Unpacking..."), tr("Cancel"), 0, 100);
+    auto progress = QtCommon::Frontend::newProgressDialog(tr("Preparando la actualización…"), tr("Cancelar"), 0, 100);
     progress->show();
     const auto extracted = QtCommon::Compress::extractDir(
         QString::fromStdWString(archive.wstring()), QString::fromStdWString(unpacked.wstring()),
@@ -308,14 +317,14 @@ void UpdateDialog::InstallInPlace() {
         });
     progress->close();
     if (extracted.isEmpty()) {
-        fail(tr("The downloaded update could not be unpacked."));
+        fail(tr("No se pudo abrir la actualización descargada."));
         return;
     }
     fs::remove(archive, ec);
 
     const auto package = UpdateInstaller::FindPackageRoot(unpacked, ExeName);
     if (!package) {
-        fail(tr("The downloaded update does not contain lichii.exe."));
+        fail(tr("La actualización descargada no trae Notos.exe."));
         return;
     }
 
@@ -325,22 +334,24 @@ void UpdateDialog::InstallInPlace() {
         UpdateInstaller::CleanStaging(install_dir);
         // Restart at once; the new version says it was installed when it is up.
         Updater::Restart(parentWidget(),
-                         tr("%1 is installed.\n\nThe previous version is kept: Help > Roll Back "
-                            "to the Previous Version brings it back.")
-                             .arg(QString::fromStdString(m_release.title)));
+                         tr("Notos v%1 está instalado.")
+                             .arg(QString::fromStdString(
+                                 UpdateChecker::ParseFritchiiTag(m_release.tag)
+                                     .value_or(UpdateChecker::FritchiiVersion{})
+                                     .ToString())));
         return;
     case UpdateInstaller::Outcome::Unchanged:
         LOG_ERROR(Frontend, "Could not install {}: {}", m_release.tag, ec.message());
-        fail(tr("Could not replace the files of this version (%1). Fritchii was not changed.")
+        fail(tr("No se pudieron reemplazar los archivos (%1). Notos no cambió.")
                  .arg(ErrorText(ec)));
         return;
     case UpdateInstaller::Outcome::Interrupted:
         LOG_CRITICAL(Frontend, "Installing {} failed and could not be undone: {}", m_release.tag,
                      ec.message());
-        Notify(parentWidget(), QMessageBox::Critical, tr("Failed to install the update"),
-               tr("The update failed (%1) and some files could not be put back. Close Fritchii and "
+        Notify(parentWidget(), QMessageBox::Critical, tr("No se pudo instalar la actualización"),
+               tr("The update failed (%1) and some files could not be put back. Close Notos and "
                   "start it again to restore the previous version. If it does not start, download "
-                  "the release again and unzip it over your Fritchii folder; your user data is not "
+                  "the release again and unzip it over your Notos folder; your user data is not "
                   "affected.")
                    .arg(ErrorText(ec)));
         return;
@@ -353,7 +364,7 @@ bool UpdateDialog::DownloadTo(const QString& filename) {
     QSaveFile file(filename);
     if (!file.open(QIODevice::Truncate | QIODevice::WriteOnly)) {
         LOG_WARNING(Frontend, "Could not open file {}", filename.toStdString());
-        Notify(parentWidget(), QMessageBox::Critical, tr("Failed to save file"),
+        Notify(parentWidget(), QMessageBox::Critical, tr("No se pudo guardar"),
                tr("Could not open file %1 for writing.").arg(filename));
         return false;
     }
@@ -366,7 +377,7 @@ bool UpdateDialog::DownloadTo(const QString& filename) {
     client->set_read_timeout(timeout_seconds);
     client->set_write_timeout(timeout_seconds);
     client->set_follow_location(true);
-    client->set_default_headers({{"User-Agent", "Lichii"}});
+    client->set_default_headers({{"User-Agent", "Notos"}});
 
 #ifdef YUZU_BUNDLED_OPENSSL
     client->load_ca_cert_store(kCert, sizeof(kCert));
@@ -378,7 +389,7 @@ bool UpdateDialog::DownloadTo(const QString& filename) {
     }
 
     auto progress =
-        QtCommon::Frontend::newProgressDialog(tr("Downloading..."), tr("Cancel"), 0, 100);
+        QtCommon::Frontend::newProgressDialog(tr("Descargando la actualización…"), tr("Cancelar"), 0, 100);
     progress->show();
 
     QGuiApplication::processEvents();
@@ -403,7 +414,7 @@ bool UpdateDialog::DownloadTo(const QString& filename) {
         if (file.write(t_data, data_length) == -1) {
             LOG_WARNING(Frontend, "Could not write {} bytes to file {}", data_length,
                         filename.toStdString());
-            Notify(parentWidget(), QMessageBox::Critical, tr("Failed to save file"),
+            Notify(parentWidget(), QMessageBox::Critical, tr("No se pudo guardar"),
                    tr("Could not write to file %1.").arg(filename));
             return false;
         }
@@ -423,7 +434,7 @@ bool UpdateDialog::DownloadTo(const QString& filename) {
             hash.reset();
             received = 0;
             progress->setValue(0);
-            progress->setLabelText(tr("Downloading... (try %1 of %2)").arg(attempt).arg(attempts));
+            progress->setLabelText(tr("Descargando… (intento %1 de %2)").arg(attempt).arg(attempts));
             QEventLoop wait;
             QTimer::singleShot(2000 * (attempt - 1), &wait, &QEventLoop::quit);
             wait.exec();
@@ -447,9 +458,8 @@ bool UpdateDialog::DownloadTo(const QString& filename) {
         LOG_ERROR(Frontend, "GET to {}{} failed: {}", m_asset.url, m_asset.path,
                   httplib::to_string(result.error()));
         if (result.error() != httplib::Error::Canceled) {
-            Notify(parentWidget(), QMessageBox::Critical, tr("Failed to download file"),
-                   tr("Could not download the update. Check your internet "
-                      "connection and try again."));
+            Notify(parentWidget(), QMessageBox::Critical, tr("No se pudo descargar"),
+                   tr("No se pudo descargar la actualización. Revisa tu conexión a internet y vuelve a intentarlo."));
         }
         return false;
     }
@@ -458,7 +468,7 @@ bool UpdateDialog::DownloadTo(const QString& filename) {
     if (response.status >= 400) {
         LOG_ERROR(Frontend, "GET to {}{} returned error status code: {}", m_asset.url, m_asset.path,
                   response.status);
-        Notify(parentWidget(), QMessageBox::Critical, tr("Failed to download file"),
+        Notify(parentWidget(), QMessageBox::Critical, tr("No se pudo descargar"),
                tr("Could not download from %1%2\nError code: %3")
                    .arg(QString::fromStdString(m_asset.url), QString::fromStdString(m_asset.path),
                         QString::number(response.status)));
@@ -477,15 +487,14 @@ bool UpdateDialog::DownloadTo(const QString& filename) {
         LOG_ERROR(Frontend, "Downloaded {} does not match the published size or SHA-256",
                   m_asset.filename);
         file.cancelWriting();
-        Notify(parentWidget(), QMessageBox::Critical, tr("Download failed verification"),
-               tr("The downloaded file does not match the checksum GitHub published for it, so it "
-                  "was discarded. Try again later."));
+        Notify(parentWidget(), QMessageBox::Critical, tr("La descarga no pasó la verificación"),
+               tr("El archivo descargado no coincide con el que publicó GitHub, así que se descartó. Vuelve a intentarlo más tarde."));
         return false;
     }
 
     if (!file.commit()) {
         LOG_WARNING(Frontend, "Could not commit to file {}", filename.toStdString());
-        Notify(parentWidget(), QMessageBox::Critical, tr("Failed to save file"),
+        Notify(parentWidget(), QMessageBox::Critical, tr("No se pudo guardar"),
                tr("Could not commit to file %1.").arg(filename));
         return false;
     }
@@ -557,9 +566,9 @@ bool FinishPendingSwap(QWidget* window) {
             QCoreApplication::translate("Updater", "Interrupted Update"),
             QCoreApplication::translate(
                 "Updater",
-                "An update was interrupted and could not be undone (%1). Close every Fritchii "
-                "window and start Fritchii again. If it keeps failing, download the release again "
-                "and unzip it over your Fritchii folder; your user data is not affected.")
+                "An update was interrupted and could not be undone (%1). Close every Notos "
+                "window and start Notos again. If it keeps failing, download the release again "
+                "and unzip it over your Notos folder; your user data is not affected.")
                 .arg(ErrorText(ec)));
         return false;
     }
@@ -583,14 +592,14 @@ void RollBack(QWidget* window) {
     const auto install_dir = InstallDir();
     if (!UpdateInstaller::IsWritable(install_dir)) {
         Notify(window, QMessageBox::Critical, title,
-               QCoreApplication::translate("Updater", "Fritchii can't write to its folder (%1).")
+               QCoreApplication::translate("Updater", "Notos can't write to its folder (%1).")
                    .arg(QDir::toNativeSeparators(QString::fromStdWString(InstallDir().wstring()))));
         return;
     }
     const auto answer =
         Notify(window, QMessageBox::Question, title,
                QCoreApplication::translate(
-                   "Updater", "Go back to %1? Fritchii will restart. Your settings, saves "
+                   "Updater", "Go back to %1? Notos will restart. Your settings, saves "
                               "and keys are not changed, and you can switch back to this "
                               "version the same way.")
                    .arg(FritchiiName(*version)),
@@ -602,7 +611,7 @@ void RollBack(QWidget* window) {
     const UpdateInstaller::Lock lock{install_dir / UpdateInstaller::LockName};
     if (!lock.Held()) {
         Notify(window, QMessageBox::Critical, title,
-               QCoreApplication::translate("Updater", "Another Fritchii window is already "
+               QCoreApplication::translate("Updater", "Another Notos window is already "
                                                       "updating this folder."));
         return;
     }
@@ -622,7 +631,7 @@ void RollBack(QWidget* window) {
         UpdateInstaller::CleanStaging(install_dir);
         Notify(window, QMessageBox::Critical, title,
                QCoreApplication::translate("Updater",
-                                           "Could not roll back (%1). Fritchii was not changed.")
+                                           "Could not roll back (%1). Notos was not changed.")
                    .arg(ErrorText(ec)));
         return;
     case UpdateInstaller::Outcome::Interrupted:
@@ -630,7 +639,7 @@ void RollBack(QWidget* window) {
         Notify(window, QMessageBox::Critical, title,
                QCoreApplication::translate(
                    "Updater", "Rolling back failed (%1) and some files could not be put "
-                              "back. Close Fritchii and start it again to restore this version.")
+                              "back. Close Notos and start it again to restore this version.")
                    .arg(ErrorText(ec)));
         return;
     }
@@ -645,7 +654,7 @@ bool Restart(QWidget* window, const QString& note) {
         LOG_CRITICAL(Frontend, "Not restarting {}: it is not the installed version", PathText(exe));
         Notify(window, QMessageBox::Critical,
                QCoreApplication::translate("Updater", "Failed to restart"),
-               QCoreApplication::translate("Updater", "Please start Fritchii again yourself."));
+               QCoreApplication::translate("Updater", "Please start Notos again yourself."));
         return false;
     }
     std::vector<std::string> arguments;
@@ -675,7 +684,7 @@ bool Restart(QWidget* window, const QString& note) {
         LOG_ERROR(Frontend, "Could not start {}", program.toStdString());
         Notify(window, QMessageBox::Critical,
                QCoreApplication::translate("Updater", "Failed to restart"),
-               QCoreApplication::translate("Updater", "Please start Fritchii again yourself."));
+               QCoreApplication::translate("Updater", "Please start Notos again yourself."));
         return false;
     }
     LOG_INFO(Frontend, "Restarting {}", PathText(exe));

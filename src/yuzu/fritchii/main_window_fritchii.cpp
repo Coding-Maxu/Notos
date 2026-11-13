@@ -13,6 +13,7 @@
 #include <QStatusBar>
 #include <QTimer>
 
+#include "common/scm_rev.h"
 #include "core/core.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/hle/service/am/applet_manager.h"
@@ -73,26 +74,12 @@ void MainWindow::SetUpFritchiiUi() {
          .whats_new = [this] { FritchiiUi::ShowWhatsNew(this); },
          .delete_shader_cache = [delete_shader_cache] { delete_shader_cache(OcarinaOfTime); }});
 
-    // "What's new" once per version after an update, when nothing else is on screen: no other
-    // dialog (first-launch question, update offer, restart note) and no game running.
+    // Notos: Fritchii's "what's new" notes don't describe Notos versions, so they are only marked
+    // seen; after an update Notos says which version was installed instead.
     const bool used_before = Settings::values.oot_fps_asked.GetValue();
     if (FritchiiUi::ShouldShowWhatsNew(used_before)) {
-        auto* timer = new QTimer(this);
-        timer->setInterval(1500);
-        connect(timer, &QTimer::timeout, this, [this, timer] {
-            const bool first_question_pending =
-                !launched_with_game && !Settings::values.oot_fps_asked.GetValue();
-            if (QApplication::activeModalWidget() != nullptr || first_question_pending ||
-                emulation_running || boot_in_progress) {
-                return;
-            }
-            timer->stop();
-            timer->deleteLater();
-            FritchiiUi::MarkWhatsNewSeen();
-            OnSaveConfig();
-            FritchiiUi::ShowWhatsNew(this);
-        });
-        timer->start();
+        FritchiiUi::MarkWhatsNewSeen();
+        OnSaveConfig();
     } else if (!used_before) {
         OnSaveConfig(); // a first install recorded its version
     }
@@ -265,10 +252,16 @@ void MainWindow::SetUpFritchiiUi() {
                 }
             },
         .in_room = [this] { return ui->action_Leave_Room->isEnabled(); },
+#ifdef ENABLE_UPDATE_CHECKER
+        .check_updates = [this] { StartUpdateCheck(true); },
+#endif
+        .version =
+            [] { return QString::fromLatin1(Common::g_build_version).remove(QLatin1Char('v')); },
     };
     // Notos: the launcher-style home screen in place of Fritchii's (FritchiiUi::Home).
     auto* notos_home = new Notos::Home(this, ui->horizontalLayout, game_list,
                                        game_list_placeholder, std::move(home));
+    notos_home_screen = notos_home;
     connect(this, &MainWindow::EmulationStarting, notos_home, &Notos::Home::OnEmulationStarting);
     // Its loading screen follows the emulator's: shader progress, then gone with it.
     connect(this, &MainWindow::EmulationStarting, notos_home, [notos_home] {

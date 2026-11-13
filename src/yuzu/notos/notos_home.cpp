@@ -329,9 +329,12 @@ Home::Home(QMainWindow* window_, QBoxLayout* central, QWidget* game_list_, QWidg
     central->addWidget(this, 1);
 
     LoadConfig();
-    // Next to the config folder: user/notos_music.
-    sounds.Load(QDir::cleanPath(QFileInfo(ConfigPath()).absolutePath() +
-                                QStringLiteral("/../notos_music")));
+    // Next to Notos.exe (the sounds come with each version), or user/notos_music from before.
+    const QString music = QCoreApplication::applicationDirPath() + QStringLiteral("/notos_music");
+    sounds.Load(QDir(music).exists()
+                    ? music
+                    : QDir::cleanPath(QFileInfo(ConfigPath()).absolutePath() +
+                                      QStringLiteral("/../notos_music")));
     ApplySound();
 
     // The classic menus stay in a zero-height bar (their shortcuts keep working); the classic game
@@ -3075,6 +3078,28 @@ void Home::Message(const QString& text) {
     OpenMenu(text, {Entry{[] { return QStringLiteral("Aceptar"); }, [] {}, {}, true}});
 }
 
+bool Home::Idle() const {
+    const bool game = hooks.emulation_running && hooks.emulation_running();
+    return isVisible() && !intro_pending && intro_start < 0 && menu.empty() && !loading &&
+           !closing && !game;
+}
+
+void Home::OfferUpdate(const QString& version, std::function<void()> install,
+                       std::function<void()> later, std::function<void()> skip) {
+    OpenMenu(QStringLiteral("Notos v%1 está disponible").arg(version),
+             {
+                 Entry{[] { return QStringLiteral("Actualizar ahora"); }, std::move(install), {},
+                       true},
+                 Entry{[] { return QStringLiteral("Más tarde"); }, std::move(later), {}, true},
+                 Entry{[] { return QStringLiteral("Omitir esta versión"); }, std::move(skip), {},
+                       true},
+             });
+}
+
+void Home::Notice(const QString& text) {
+    Message(text);
+}
+
 void Home::AddMenu() {
     OpenMenu(QStringLiteral("Agregar"),
              {
@@ -3199,6 +3224,16 @@ void Home::SettingsMenu() {
                   [this] { hooks.open_settings(); }, {}, true},
             Entry{[] { return QStringLiteral("Partidas guardadas"); },
                   [this] { hooks.open_saves(); }, {}, true},
+            Entry{[this] {
+                      return QStringLiteral("Buscar actualizaciones (Notos v%1)")
+                          .arg(hooks.version ? hooks.version() : QString{});
+                  },
+                  [this] {
+                      if (hooks.check_updates) {
+                          hooks.check_updates();
+                      }
+                  },
+                  {}, true},
         });
 }
 

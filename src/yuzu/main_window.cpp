@@ -21,6 +21,7 @@
 #include "video_core/post_processing/fx_preset.h"
 #endif
 #include "updater/update_dialog.h"
+#include "yuzu/notos/notos_home.h"
 
 #include "common/fs/ryujinx_compat.h"
 #include "main_window.h"
@@ -5083,19 +5084,21 @@ void MainWindow::OnEmulatorUpdateAvailable() {
         QString text;
         switch (result.failure) {
         case UpdateChecker::Failure::RateLimited:
-            text = tr("Could not check for updates: GitHub rate limit reached. Fritchii will try "
-                      "again at the next start.");
+            text = tr("No se pudo buscar actualizaciones: GitHub limitó las consultas. Notos lo "
+                      "intentará de nuevo la próxima vez que abra.");
             break;
         case UpdateChecker::Failure::Http:
-            text =
-                tr("Could not check for updates: GitHub answered with HTTP %1.").arg(result.status);
+            text = tr("No se pudo buscar actualizaciones: GitHub respondió con el error %1.")
+                       .arg(result.status);
             break;
         default:
-            text = tr("Could not check for updates. Check your internet connection.");
+            text = tr("No se pudo buscar actualizaciones. Revisa tu conexión a internet.");
             break;
         }
         // The check at startup stays quiet when offline.
-        if (manual) {
+        if (manual && notos_home_screen) {
+            notos_home_screen->Notice(text);
+        } else if (manual) {
             QMessageBox::warning(this, tr("Check for Updates"), text);
         } else if (result.failure != UpdateChecker::Failure::Network) {
             statusBar()->showMessage(text, 15000);
@@ -5103,7 +5106,10 @@ void MainWindow::OnEmulatorUpdateAvailable() {
         return;
     }
     if (!result.update) {
-        if (manual) {
+        if (manual && notos_home_screen) {
+            notos_home_screen->Notice(tr("Ya tienes la última versión (Notos %1).")
+                                          .arg(QString::fromLatin1(Common::g_build_version)));
+        } else if (manual) {
             QMessageBox::information(this, tr("Check for Updates"),
                                      tr("You have the latest version (%1 %2).")
                                          .arg(QString::fromLatin1(Common::g_build_name),
@@ -5136,7 +5142,8 @@ void MainWindow::OfferPendingUpdate() {
     // Wait for other dialogs, such as the first-launch frame rate question, to be answered.
     const bool first_question_pending =
         !launched_with_game && !Settings::values.oot_fps_asked.GetValue();
-    if (QApplication::activeModalWidget() != nullptr || first_question_pending) {
+    if (QApplication::activeModalWidget() != nullptr || first_question_pending ||
+        (notos_home_screen && !notos_home_screen->Idle())) {
         QTimer::singleShot(1000, this, &MainWindow::OfferPendingUpdate);
         return;
     }
@@ -5146,8 +5153,13 @@ void MainWindow::OfferPendingUpdate() {
 }
 
 void MainWindow::ShowRestartNote() {
-    if (QApplication::activeModalWidget() != nullptr) {
+    if (QApplication::activeModalWidget() != nullptr ||
+        (notos_home_screen && !notos_home_screen->Idle())) {
         QTimer::singleShot(1000, this, &MainWindow::ShowRestartNote);
+        return;
+    }
+    if (notos_home_screen) {
+        notos_home_screen->Notice(restart_note);
         return;
     }
     QMessageBox::information(this, tr("Fritchii"), restart_note);
@@ -5156,6 +5168,25 @@ void MainWindow::ShowRestartNote() {
 void MainWindow::ShowUpdate(const UpdateChecker::CheckResult& result) {
     const auto& release = *result.update;
     const auto now = static_cast<unsigned long long>(QDateTime::currentSecsSinceEpoch());
+    if (notos_home_screen) {
+        const auto version = UpdateChecker::ParseFritchiiTag(release.tag);
+        notos_home_screen->OfferUpdate(
+            QString::fromStdString(version ? version->ToString() : release.tag),
+            [this, result] {
+                auto* dialog = new UpdateDialog(*result.update, result.asset, this);
+                dialog->Install();
+                dialog->deleteLater();
+            },
+            [this, now] {
+                UISettings::values.update_remind_at = now + 24 * 60 * 60;
+                OnSaveConfig();
+            },
+            [this, tag = release.tag] {
+                UISettings::values.skipped_update_tag = tag;
+                OnSaveConfig();
+            });
+        return;
+    }
     UpdateDialog dialog(release, result.asset, this);
     switch (dialog.exec()) {
     case UpdateDialog::SkipVersion:

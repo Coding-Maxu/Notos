@@ -33,9 +33,12 @@ std::optional<u64> ParseBuildNumber(std::string_view tag) {
     return number;
 }
 
-constexpr std::string_view ReleaseRepo = "Frizti/Lichii";
-// Download URLs name the repository by its current name; GitHub redirects the old one.
-constexpr std::array RepoNames{std::string_view{"Lichii"}, std::string_view{"Fritchii"}};
+// Notos: the GitHub repository (owner/name) its releases are published to, set at configure time
+// (NOTOS_RELEASE_REPO). Empty: no update checks.
+#ifndef NOTOS_RELEASE_REPO
+#define NOTOS_RELEASE_REPO ""
+#endif
+constexpr std::string_view ReleaseRepo = NOTOS_RELEASE_REPO;
 
 std::optional<u32> ParseNumber(std::string_view text) {
     if (text.empty() || (text.size() > 1 && text.front() == '0') ||
@@ -56,6 +59,10 @@ CheckResult CheckFritchii([[maybe_unused]] const FritchiiVersion& current) {
     return {};
 #else
     auto source = DefaultSource();
+    const char* override_env = std::getenv("EDEN_UPDATE_URL");
+    if (ReleaseRepo.empty() && (override_env == nullptr || *override_env == '\0')) {
+        return {};
+    }
     if (const char* override_url = std::getenv("EDEN_UPDATE_URL");
         override_url != nullptr && *override_url != '\0') {
         const auto parsed = ParseSourceOverride(override_url);
@@ -206,7 +213,7 @@ std::optional<FritchiiVersion> RunningVersion() {
 }
 
 std::optional<FritchiiVersion> ParseFritchiiTag(std::string_view tag) {
-    for (const std::string_view prefix : {"fritchii-v", "frizti-v"}) {
+    for (const std::string_view prefix : {"notos-v"}) {
         if (tag.starts_with(prefix)) {
             return ParseFritchiiVersion(tag.substr(prefix.size()));
         }
@@ -215,7 +222,7 @@ std::optional<FritchiiVersion> ParseFritchiiTag(std::string_view tag) {
 }
 
 std::string FritchiiAssetName(const FritchiiVersion& version) {
-    return fmt::format("Fritchii-v{}-Windows-x64.zip", version.ToString());
+    return fmt::format("Notos-v{}-Windows-x64.zip", version.ToString());
 }
 
 Source DefaultSource() {
@@ -272,11 +279,17 @@ std::optional<Common::Net::Asset> SelectFritchiiAsset(const Common::Net::Release
                 origin = source.origin;
             }
         } else {
-            for (const auto repo : RepoNames) {
-                if (url == fmt::format("https://github.com/Frizti/{}/releases/download/{}/{}", repo,
-                                       release.tag, filename)) {
-                    origin = "https://github.com";
-                }
+            // GitHub writes the owner and name as the repository spells them.
+            auto expected = fmt::format("https://github.com/{}/releases/download/{}/{}",
+                                        ReleaseRepo, release.tag, filename);
+            auto actual = url;
+            for (auto* text : {&expected, &actual}) {
+                std::ranges::transform(*text, text->begin(), [](unsigned char c) {
+                    return static_cast<char>(std::tolower(c));
+                });
+            }
+            if (!ReleaseRepo.empty() && actual == expected) {
+                origin = "https://github.com";
             }
         }
         if (origin.empty()) {

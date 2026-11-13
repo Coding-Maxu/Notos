@@ -25,6 +25,7 @@ if (ENABLE_UPDATE_CHECKER)
     target_link_libraries(frontend_common PRIVATE httplib::httplib)
     target_link_libraries(frontend_common PRIVATE nlohmann_json::nlohmann_json)
     target_link_libraries(frontend_common PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    target_compile_definitions(frontend_common PRIVATE NOTOS_RELEASE_REPO="${NOTOS_RELEASE_REPO}")
 endif()
 
 create_target_directory_groups(frontend_common)

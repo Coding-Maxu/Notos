@@ -27,6 +27,9 @@ public:
                           QWidget* parent = nullptr);
     ~UpdateDialog();
 
+    // Notos: install the update without showing the dialog (Notos asks in its own menu).
+    void Install();
+
 private slots:
     void Download();
 

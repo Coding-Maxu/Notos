@@ -65,6 +65,9 @@ class WaitTreeWidget;
 class PerformanceOverlay;
 #ifdef HAS_RESHADE
 class ConfigurePostProcessing;
+namespace Notos {
+class Home;
+}
 #endif
 enum class GameListOpenTarget;
 enum class DumpRomFSTarget;
@@ -552,6 +555,9 @@ private:
     // What the process this one replaced reported, such as "Fritchii v5 is installed".
     QString restart_note;
 #endif
+
+    // The Notos home screen, which asks about updates in its own menus.
+    Notos::Home* notos_home_screen = nullptr;
 
     MultiplayerState* multiplayer_state = nullptr;
     bool use_recommended_mkw_settings = false;
