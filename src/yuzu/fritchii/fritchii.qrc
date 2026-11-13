@@ -26,5 +26,6 @@
         <file>icons/heart.svg</file>
         <file>icons/power.svg</file>
         <file>icons/gamepad.svg</file>
+        <file>icons/user.svg</file>
     </qresource>
 </RCC>

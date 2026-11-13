@@ -66,6 +66,8 @@ struct HomeHooks {
         read_game;
     /// Seconds a Switch game has been played (the emulator's own count).
     std::function<u64(u64 program_id)> play_time;
+    /// The system's Mii Editor (from the firmware).
+    std::function<void()> mii_editor;
 };
 
 class Home;
@@ -237,7 +239,7 @@ private:
 
     QJsonObject config;
     std::vector<Game> games;
-    int row = 0; ///< 0: covers, 1: round buttons
+    int row = 0; ///< -1: the Mii button at the top, 0: covers, 1: round buttons
     int game_index = 0;
     int button_index = 0;
     double scroll = 0;
@@ -285,6 +287,7 @@ private:
     std::vector<QRect> button_rects;
     std::vector<QRect> menu_rects;
     QRect menu_box;
+    QRect mii_rect;
 
     // Gamepad: the buttons held at the last poll and when a direction repeats next.
     u64 pad_held = 0;

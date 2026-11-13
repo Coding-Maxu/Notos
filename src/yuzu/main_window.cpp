@@ -5670,7 +5670,9 @@ void MainWindow::SetFirmwareVersion() {
     const auto result = pair.second;
 
     if (result.IsError() || !CheckFirmwarePresence()) {
-        LOG_INFO(Frontend, "Installed firmware: No firmware available");
+        LOG_INFO(Frontend,
+                 "Installed firmware: No firmware available (version read: {}, Mii Edit: {})",
+                 result.IsError() ? "failed" : "ok", CheckFirmwarePresence() ? "found" : "missing");
         ui->menu_Applets->setEnabled(false);
         ui->menu_Create_Shortcuts->setEnabled(false);
         firmware_label->setVisible(false);

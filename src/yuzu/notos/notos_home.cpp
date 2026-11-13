@@ -1704,6 +1704,34 @@ void Home::paintEvent(QPaintEvent*) {
     p.setFont(Font(font(), 18 * s));
     p.drawText(QRectF(badge_rect.right() + 14 * s, badge_rect.top(), 400 * s, badge),
                Qt::AlignVCenter | Qt::AlignLeft, QStringLiteral("Notos"));
+    // Next to the name: the Mii Editor, a row of its own above the covers.
+    {
+        const double name_w = QFontMetricsF(p.font()).horizontalAdvance(QStringLiteral("Notos"));
+        const QFont mii_font = Font(font(), 15 * s, QFont::Medium);
+        const QString mii_label = QStringLiteral("Editor de Mii");
+        const int glyph = static_cast<int>(18 * s);
+        const double pill_h = std::max(badge * 0.8, 30 * s);
+        const double pill_w =
+            QFontMetricsF(mii_font).horizontalAdvance(mii_label) + glyph + 40 * s;
+        const QRectF pill(badge_rect.right() + 14 * s + name_w + 26 * s,
+                          badge_rect.center().y() - pill_h / 2, pill_w, pill_h);
+        mii_rect = pill.toAlignedRect();
+        const bool on = row == -1 && menu.empty();
+        p.setBrush(panel);
+        p.setPen(on ? QPen(AccentBrush(pill), 3 * s) : QPen(Qt::NoPen));
+        p.drawRoundedRect(pill.adjusted(1.5 * s, 1.5 * s, -1.5 * s, -1.5 * s), pill_h / 2,
+                          pill_h / 2);
+        const QPixmap mii_icon =
+            FritchiiUi::Glyph(QStringLiteral("user"), text.rgb() & 0xFFFFFF, glyph)
+                .pixmap(glyph, glyph);
+        p.drawPixmap(QRectF(pill.left() + 16 * s, pill.center().y() - glyph / 2.0, glyph, glyph),
+                     mii_icon, QRectF(mii_icon.rect()));
+        p.setPen(text);
+        p.setFont(mii_font);
+        p.drawText(QRectF(pill.left() + 16 * s + glyph + 8 * s, pill.top(),
+                          pill_w - glyph - 32 * s, pill_h),
+                   Qt::AlignVCenter | Qt::AlignLeft, mii_label);
+    }
     p.setOpacity(ui);
     const bool clock24 = Prefs().value(QStringLiteral("clock24")).toBool();
     p.setPen(text);
@@ -2317,15 +2345,23 @@ void Home::Nav(const QString& cmd) {
         const int d = cmd == QStringLiteral("left") ? -1 : 1;
         if (row == 0) {
             game_index += d;
-        } else {
+        } else if (row == 1) {
             button_index += d;
         }
     } else if (cmd == QStringLiteral("up")) {
-        row = 0;
+        row = row == 0 ? -1 : 0;
+        if (row == 0 && games.empty()) {
+            row = -1;
+        }
     } else if (cmd == QStringLiteral("down")) {
-        row = 1;
+        row = row == -1 && !games.empty() ? 0 : 1;
     } else if (cmd == QStringLiteral("accept")) {
-        if (row == 0 && !games.empty()) {
+        if (row == -1) {
+            sounds.Play(QStringLiteral("select"));
+            if (hooks.mii_editor) {
+                hooks.mii_editor();
+            }
+        } else if (row == 0 && !games.empty()) {
             Launch(games[game_index]);
         } else if (row == 1) {
             switch (button_index) {
@@ -2352,7 +2388,7 @@ void Home::Nav(const QString& cmd) {
 }
 
 void Home::Select() {
-    if (games.empty()) {
+    if (games.empty() && row == 0) {
         row = 1;
     }
     game_index = std::clamp(game_index, 0, std::max(0, static_cast<int>(games.size()) - 1));
@@ -2407,6 +2443,11 @@ void Home::mousePressEvent(QMouseEvent* event) {
     const QPoint pos = event->position().toPoint();
     if (!menu.empty()) {
         MenuMouse(pos, event->button());
+        return;
+    }
+    if (mii_rect.contains(pos) && event->button() == Qt::LeftButton) {
+        row = -1;
+        Nav(QStringLiteral("accept"));
         return;
     }
     for (int i = 0; i < static_cast<int>(tile_rects.size()); ++i) {

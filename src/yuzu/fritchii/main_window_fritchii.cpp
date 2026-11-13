@@ -240,6 +240,7 @@ void MainWindow::SetUpFritchiiUi() {
                 return true;
             },
         .play_time = [this](u64 program_id) { return play_time_manager->GetPlayTime(program_id); },
+        .mii_editor = [this] { ui->action_Launch_MiiEdit->trigger(); },
     };
     // Notos: the launcher-style home screen in place of Fritchii's (FritchiiUi::Home).
     auto* notos_home = new Notos::Home(this, ui->horizontalLayout, game_list,
