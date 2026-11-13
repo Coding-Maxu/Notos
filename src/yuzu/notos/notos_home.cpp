@@ -296,6 +296,10 @@ Home::Home(QMainWindow* window_, QBoxLayout* central, QWidget* game_list_, QWidg
     central->addWidget(this, 1);
 
     LoadConfig();
+    // Next to the config folder: user/notos_music.
+    sounds.Load(QDir::cleanPath(QFileInfo(ConfigPath()).absolutePath() +
+                                QStringLiteral("/../notos_music")));
+    ApplySound();
 
     // The classic menus stay in a zero-height bar (their shortcuts keep working); the classic game
     // list shows them, with "Inicio" to come back.
@@ -475,7 +479,14 @@ QJsonObject Home::Prefs() const {
     fallback("fullscreen", true);
     fallback("gamesFullscreen", true);
     fallback("clock24", true);
+    fallback("sound", true);
+    fallback("volume", 70);
     return settings;
+}
+
+void Home::ApplySound() {
+    sounds.SetEnabled(Prefs().value(QStringLiteral("sound")).toBool());
+    sounds.SetVolume(Prefs().value(QStringLiteral("volume")).toInt());
 }
 
 bool Home::GamesFullscreen() const {
@@ -589,6 +600,7 @@ void Home::AnimTick() {
         if (intro_calm >= 20) {
             intro_pending = false;
             intro_start = 0;
+            sounds.Play(QStringLiteral("startup"));
         }
     } else if (intro_start >= 0) {
         intro_start += std::min(dt, 34.0);
@@ -893,6 +905,7 @@ void Home::StartReveal() {
     }
     intro_reveal_only = true;
     intro_start = IntroUi - 60;
+    sounds.Play(QStringLiteral("home"));
     update();
 }
 
@@ -1028,6 +1041,7 @@ void Home::ReadNativeProgress() {
 }
 
 void Home::EndLoading() {
+    sounds.Stop(QStringLiteral("loading"));
     const bool emulated = loading_emulated;
     loading = false;
     loading_emulated = false;
@@ -1290,6 +1304,7 @@ void Home::ToggleNativeMenu() {
         window->showMinimized();
     }
     if (overlay->isVisible()) {
+        sounds.Play(QStringLiteral("select"));
         LeaveGameMenu(true);
         return;
     }
@@ -1298,6 +1313,7 @@ void Home::ToggleNativeMenu() {
     }
     native_menu = true;
     NativeMenuEntries();
+    sounds.Play(QStringLiteral("select"));
     PlaceOverlay();
     overlay->show();
     overlay->raise();
@@ -1405,6 +1421,7 @@ void Home::ToggleGameMenu() {
         return;
     }
     if (overlay->isVisible()) {
+        sounds.Play(QStringLiteral("select"));
         LeaveGameMenu(true);
         return;
     }
@@ -1414,6 +1431,7 @@ void Home::ToggleGameMenu() {
     // The menu shows over the game, which goes on running underneath.
     paused_by_menu = false;
     GameMenuEntries();
+    sounds.Play(QStringLiteral("select"));
     PlaceOverlay();
     overlay->show();
     overlay->raise();
@@ -2194,6 +2212,7 @@ void Home::Nav(const QString& cmd) {
     }
     if (intro_start >= 0 && !intro_reveal_only) {
         // Any press skips the opening.
+        sounds.Stop(QStringLiteral("startup"));
         intro_start = -1;
         intro_reveal_only = false;
         update();
@@ -2231,16 +2250,20 @@ void Home::Nav(const QString& cmd) {
         Entry& at = menu[menu_index];
         if (cmd == QStringLiteral("up")) {
             menu_index = (menu_index + count - 1) % count;
+            sounds.Play(QStringLiteral("move"));
         } else if (cmd == QStringLiteral("down")) {
             menu_index = (menu_index + 1) % count;
+            sounds.Play(QStringLiteral("move"));
         } else if (cmd == QStringLiteral("back")) {
             CloseMenu();
             return;
         } else if ((cmd == QStringLiteral("left") || cmd == QStringLiteral("right")) && at.adjust) {
             at.adjust(cmd == QStringLiteral("left") ? -1 : 1);
+            sounds.Play(QStringLiteral("move"));
         } else if (cmd == QStringLiteral("accept")) {
             if (at.adjust && !at.act) {
                 at.adjust(1);
+                sounds.Play(QStringLiteral("select"));
             } else {
                 RunEntry(menu_index);
                 return;
@@ -2281,7 +2304,11 @@ void Home::Nav(const QString& cmd) {
         GameMenu();
         return;
     }
+    const int was_row = row, was_game = game_index, was_button = button_index;
     Select();
+    if (row != was_row || game_index != was_game || button_index != was_button) {
+        sounds.Play(QStringLiteral("move"));
+    }
 }
 
 void Home::Select() {
@@ -2315,9 +2342,11 @@ void Home::MenuMouse(const QPoint& pos, Qt::MouseButton button) {
         if (button == Qt::RightButton) {
             if (menu[i].adjust) {
                 menu[i].adjust(-1);
+                sounds.Play(QStringLiteral("move"));
             }
         } else if (menu[i].adjust && !menu[i].act) {
             menu[i].adjust(1);
+            sounds.Play(QStringLiteral("select"));
         } else {
             RunEntry(i);
             return;
@@ -2348,6 +2377,9 @@ void Home::mousePressEvent(QMouseEvent* event) {
         row = 0;
         game_index = i;
         Select();
+        if (!again) {
+            sounds.Play(QStringLiteral("move"));
+        }
         if (event->button() == Qt::RightButton) {
             GameMenu();
         } else if (again) {
@@ -2389,8 +2421,12 @@ void Home::wheelEvent(QWheelEvent* event) {
         return;
     }
     row = 0;
+    const int was = game_index;
     game_index += steps > 0 ? -1 : 1;
     Select();
+    if (game_index != was) {
+        sounds.Play(QStringLiteral("move"));
+    }
 }
 
 void Home::PollPad() {
@@ -2479,6 +2515,7 @@ void Home::Launch(const Game& game) {
     if (loading) {
         return;
     }
+    sounds.Play(QStringLiteral("loading"));
     if (game.native) {
         LaunchNative(game);
         return;
@@ -2850,10 +2887,15 @@ void Home::OpenMenu(const QString& title, std::vector<Entry> entries) {
     menu_title = title;
     menu = std::move(entries);
     menu_index = 0;
+    sounds.Play(title == QStringLiteral("Ajustes") ? QStringLiteral("settings")
+                                                   : QStringLiteral("select"));
     update();
 }
 
 void Home::CloseMenu() {
+    if (!menu.empty()) {
+        sounds.Play(QStringLiteral("select"));
+    }
     if (overlay && overlay->isVisible()) {
         LeaveGameMenu(true);
         return;
@@ -2863,6 +2905,7 @@ void Home::CloseMenu() {
 }
 
 void Home::RunEntry(int index) {
+    sounds.Play(QStringLiteral("select"));
     // The entry may replace the menu: run a copy.
     const Entry entry = menu[index];
     if (entry.close) {
@@ -2966,6 +3009,30 @@ void Home::SettingsMenu() {
                   },
                   {},
                   toggle("clock24"),
+                  false},
+            Entry{[this, yes_no] {
+                      return QStringLiteral("Música y sonidos: ") +
+                             yes_no(Prefs().value(QStringLiteral("sound")).toBool());
+                  },
+                  {},
+                  [this](int) {
+                      SetSetting(QStringLiteral("sound"),
+                                 !Prefs().value(QStringLiteral("sound")).toBool());
+                      ApplySound();
+                  },
+                  false},
+            Entry{[this] {
+                      return QStringLiteral("Volumen: %1%")
+                          .arg(Prefs().value(QStringLiteral("volume")).toInt());
+                  },
+                  {},
+                  [this](int d) {
+                      SetSetting(QStringLiteral("volume"),
+                                 std::clamp(Prefs().value(QStringLiteral("volume")).toInt() +
+                                                d * 10,
+                                            0, 100));
+                      ApplySound();
+                  },
                   false},
             Entry{[] { return QStringLiteral("Ajustes del emulador"); },
                   [this] { hooks.open_settings(); }, {}, true},

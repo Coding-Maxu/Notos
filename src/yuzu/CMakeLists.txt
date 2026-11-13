@@ -215,6 +215,8 @@ add_executable(yuzu
     fritchii/home.h
     notos/notos_home.cpp
     notos/notos_home.h
+    notos/notos_sound.cpp
+    notos/notos_sound.h
     fritchii/game_controls.cpp
     fritchii/game_controls.h
     fritchii/main_window_fritchii.cpp
@@ -440,6 +442,8 @@ elseif(WIN32)
         set_target_properties(yuzu PROPERTIES LINK_FLAGS_RELEASE "-Wl,--subsystem,windows")
         target_link_libraries(yuzu PRIVATE dwmapi)
     endif()
+    # Notos' sounds: decoded by Media Foundation, played through waveOut.
+    target_link_libraries(yuzu PRIVATE winmm mfplat mfreadwrite mfuuid)
 endif()
 
 target_link_libraries(yuzu PRIVATE nlohmann_json::nlohmann_json)

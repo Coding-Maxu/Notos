@@ -17,6 +17,7 @@
 #include <QWidget>
 
 #include "common/common_types.h"
+#include "yuzu/notos/notos_sound.h"
 
 class QBoxLayout;
 class QMainWindow;
@@ -226,6 +227,8 @@ private:
     QWidget* game_list;
     QWidget* placeholder;
     HomeHooks hooks;
+    Sounds sounds;
+    void ApplySound(); ///< the settings' sound and volume
     QTimer* refresh_timer = nullptr;
     QTimer* clock_timer = nullptr;
     QTimer* pad_timer = nullptr;
