@@ -68,6 +68,11 @@ struct HomeHooks {
     std::function<u64(u64 program_id)> play_time;
     /// The system's Mii Editor (from the firmware).
     std::function<void()> mii_editor;
+    std::function<void()> install_content; ///< an update or DLC into the NAND
+    std::function<void()> restart;         ///< the running game, without asking
+    /// Multiplayer rooms: 0 public lobby, 1 create, 2 direct connect, 3 current room, 4 leave.
+    std::function<void(int action)> multiplayer;
+    std::function<bool()> in_room;
 };
 
 class Home;
@@ -287,7 +292,11 @@ private:
     std::vector<QRect> button_rects;
     std::vector<QRect> menu_rects;
     QRect menu_box;
-    QRect mii_rect;
+    std::vector<QRect> top_rects; ///< the buttons next to the Notos name
+    int top_index = 0;
+    bool restarting = false; ///< the game stops only to start again: no closing screen
+    void RestartGame();
+    void MultiplayerMenu();
 
     // Gamepad: the buttons held at the last poll and when a direction repeats next.
     u64 pad_held = 0;

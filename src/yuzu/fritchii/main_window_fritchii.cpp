@@ -3,6 +3,8 @@
 // MainWindow's Fritchii setup, kept out of main_window.cpp so Lichii merges stay clean. It runs
 // once at the end of the constructor and does nothing in a Lichii build.
 
+#include <iterator>
+
 #include <QApplication>
 #include <QDir>
 #include <QFileInfo>
@@ -13,6 +15,7 @@
 
 #include "core/core.h"
 #include "core/file_sys/vfs/vfs_real.h"
+#include "core/hle/service/am/applet_manager.h"
 #include "core/loader/loader.h"
 #include "frontend_common/play_time_manager.h"
 #include "qt_common/qt_common.h"
@@ -241,6 +244,27 @@ void MainWindow::SetUpFritchiiUi() {
             },
         .play_time = [this](u64 program_id) { return play_time_manager->GetPlayTime(program_id); },
         .mii_editor = [this] { ui->action_Launch_MiiEdit->trigger(); },
+        .install_content = [this] { OnMenuInstallToNAND(); },
+        .restart =
+            [this] {
+                // OnRestartGame without its question: the Home menu asked already.
+                if (!QtCommon::system->IsPoweredOn()) {
+                    return;
+                }
+                const QString current_game = current_game_path;
+                ShutdownGame();
+                BootGame(current_game, ApplicationAppletParameters());
+            },
+        .multiplayer =
+            [this](int action) {
+                QAction* const actions[] = {ui->action_View_Lobby, ui->action_Start_Room,
+                                            ui->action_Connect_To_Room, ui->action_Show_Room,
+                                            ui->action_Leave_Room};
+                if (action >= 0 && action < static_cast<int>(std::size(actions))) {
+                    actions[action]->trigger();
+                }
+            },
+        .in_room = [this] { return ui->action_Leave_Room->isEnabled(); },
     };
     // Notos: the launcher-style home screen in place of Fritchii's (FritchiiUi::Home).
     auto* notos_home = new Notos::Home(this, ui->horizontalLayout, game_list,

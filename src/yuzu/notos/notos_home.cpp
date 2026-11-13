@@ -105,6 +105,11 @@ constexpr std::array<Button, 3> Buttons{{
     {"settings", "Ajustes"},
     {"power", "Salir"},
 }};
+/// Next to the Notos name, above the covers.
+constexpr std::array<Button, 2> TopButtons{{
+    {"user", "Editor de Mii"},
+    {"community", "Multijugador"},
+}};
 
 // Gamepad bits of NpadButtonState. Switch positions with the default mapping: B is the bottom
 // face button (accept, ✕ on a PlayStation pad), A the right one (back, ○), X the top one (△).
@@ -874,11 +879,49 @@ void Home::OnEmulationStarting() {
     }
 }
 
+void Home::RestartGame() {
+    if (!hooks.restart) {
+        return;
+    }
+    LeaveGameMenu(false);
+    // The loading screen shows again for the same game, in place of the closing screen.
+    restarting = true;
+    loading_game = running_game;
+    hooks.restart();
+    restarting = false;
+}
+
+void Home::MultiplayerMenu() {
+    // The emulator's rooms: local wireless play with players over the internet.
+    const auto room = [this](int action) {
+        return [this, action] {
+            if (hooks.multiplayer) {
+                hooks.multiplayer(action);
+            }
+        };
+    };
+    std::vector<Entry> entries{
+        Entry{[] { return QStringLiteral("Buscar salas públicas"); }, room(0), {}, true},
+        Entry{[] { return QStringLiteral("Crear sala"); }, room(1), {}, true},
+        Entry{[] { return QStringLiteral("Conectarse a una sala (IP)"); }, room(2), {}, true},
+    };
+    if (hooks.in_room && hooks.in_room()) {
+        entries.push_back(
+            Entry{[] { return QStringLiteral("Ver sala actual"); }, room(3), {}, true});
+        entries.push_back(
+            Entry{[] { return QStringLiteral("Salir de la sala"); }, room(4), {}, true});
+    }
+    OpenMenu(QStringLiteral("Multijugador"), std::move(entries));
+}
+
 void Home::OnEmulationStopping() {
     if (loading_emulated) {
         EndLoading();
     }
     home_down = false;
+    if (restarting) {
+        return;
+    }
     reveal_after_game = true;
     if (hooks.single_window()) {
         StartClosing(true); // in place of the Home menu, if it was open
@@ -1521,6 +1564,15 @@ void Home::GameMenuEntries() {
                   }
               },
               false},
+        Entry{[] { return QStringLiteral("Reiniciar juego"); },
+              [this] {
+                  OpenMenu(QStringLiteral("¿Reiniciar el juego? Lo que no hayas guardado se pierde."),
+                           {Entry{[] { return QStringLiteral("No"); },
+                                  [this] { GameMenuEntries(); }, {}, false},
+                            Entry{[] { return QStringLiteral("Sí, reiniciar"); },
+                                  [this] { RestartGame(); }, {}, false}});
+              },
+              {}, false},
         Entry{[] { return QStringLiteral("Cerrar juego"); },
               [this] {
                   // Asked here rather than in the emulator's own dialog, so the gamepad answers.
@@ -1704,33 +1756,38 @@ void Home::paintEvent(QPaintEvent*) {
     p.setFont(Font(font(), 18 * s));
     p.drawText(QRectF(badge_rect.right() + 14 * s, badge_rect.top(), 400 * s, badge),
                Qt::AlignVCenter | Qt::AlignLeft, QStringLiteral("Notos"));
-    // Next to the name: the Mii Editor, a row of its own above the covers.
+    // Next to the name: the Mii Editor and multiplayer, a row of their own above the covers.
     {
         const double name_w = QFontMetricsF(p.font()).horizontalAdvance(QStringLiteral("Notos"));
-        const QFont mii_font = Font(font(), 15 * s, QFont::Medium);
-        const QString mii_label = QStringLiteral("Editor de Mii");
+        const QFont pill_font = Font(font(), 15 * s, QFont::Medium);
         const int glyph = static_cast<int>(18 * s);
         const double pill_h = std::max(badge * 0.8, 30 * s);
-        const double pill_w =
-            QFontMetricsF(mii_font).horizontalAdvance(mii_label) + glyph + 40 * s;
-        const QRectF pill(badge_rect.right() + 14 * s + name_w + 26 * s,
-                          badge_rect.center().y() - pill_h / 2, pill_w, pill_h);
-        mii_rect = pill.toAlignedRect();
-        const bool on = row == -1 && menu.empty();
-        p.setBrush(panel);
-        p.setPen(on ? QPen(AccentBrush(pill), 3 * s) : QPen(Qt::NoPen));
-        p.drawRoundedRect(pill.adjusted(1.5 * s, 1.5 * s, -1.5 * s, -1.5 * s), pill_h / 2,
-                          pill_h / 2);
-        const QPixmap mii_icon =
-            FritchiiUi::Glyph(QStringLiteral("user"), text.rgb() & 0xFFFFFF, glyph)
-                .pixmap(glyph, glyph);
-        p.drawPixmap(QRectF(pill.left() + 16 * s, pill.center().y() - glyph / 2.0, glyph, glyph),
-                     mii_icon, QRectF(mii_icon.rect()));
-        p.setPen(text);
-        p.setFont(mii_font);
-        p.drawText(QRectF(pill.left() + 16 * s + glyph + 8 * s, pill.top(),
-                          pill_w - glyph - 32 * s, pill_h),
-                   Qt::AlignVCenter | Qt::AlignLeft, mii_label);
+        double x = badge_rect.right() + 14 * s + name_w + 26 * s;
+        top_rects.clear();
+        for (int i = 0; i < static_cast<int>(TopButtons.size()); ++i) {
+            const QString label = QString::fromUtf8(TopButtons[i].label);
+            const double pill_w =
+                QFontMetricsF(pill_font).horizontalAdvance(label) + glyph + 40 * s;
+            const QRectF pill(x, badge_rect.center().y() - pill_h / 2, pill_w, pill_h);
+            x += pill_w + 10 * s;
+            top_rects.push_back(pill.toAlignedRect());
+            const bool on = row == -1 && top_index == i && menu.empty();
+            p.setBrush(panel);
+            p.setPen(on ? QPen(AccentBrush(pill), 3 * s) : QPen(Qt::NoPen));
+            p.drawRoundedRect(pill.adjusted(1.5 * s, 1.5 * s, -1.5 * s, -1.5 * s), pill_h / 2,
+                              pill_h / 2);
+            const QPixmap icon_pixmap = FritchiiUi::Glyph(QString::fromLatin1(TopButtons[i].icon),
+                                                          text.rgb() & 0xFFFFFF, glyph)
+                                            .pixmap(glyph, glyph);
+            p.drawPixmap(
+                QRectF(pill.left() + 16 * s, pill.center().y() - glyph / 2.0, glyph, glyph),
+                icon_pixmap, QRectF(icon_pixmap.rect()));
+            p.setPen(text);
+            p.setFont(pill_font);
+            p.drawText(QRectF(pill.left() + 16 * s + glyph + 8 * s, pill.top(),
+                              pill_w - glyph - 32 * s, pill_h),
+                       Qt::AlignVCenter | Qt::AlignLeft, label);
+        }
     }
     p.setOpacity(ui);
     const bool clock24 = Prefs().value(QStringLiteral("clock24")).toBool();
@@ -2340,26 +2397,30 @@ void Home::Nav(const QString& cmd) {
         update();
         return;
     }
-    const int was_row = row, was_game = game_index, was_button = button_index;
+    const int was_row = row, was_game = game_index, was_button = button_index,
+              was_top = top_index;
     if (cmd == QStringLiteral("left") || cmd == QStringLiteral("right")) {
         const int d = cmd == QStringLiteral("left") ? -1 : 1;
         if (row == 0) {
             game_index += d;
         } else if (row == 1) {
             button_index += d;
+        } else {
+            top_index = std::clamp(top_index + d, 0, static_cast<int>(TopButtons.size()) - 1);
         }
     } else if (cmd == QStringLiteral("up")) {
-        row = row == 0 ? -1 : 0;
-        if (row == 0 && games.empty()) {
-            row = -1;
-        }
+        row = row == 1 && !games.empty() ? 0 : -1;
     } else if (cmd == QStringLiteral("down")) {
         row = row == -1 && !games.empty() ? 0 : 1;
     } else if (cmd == QStringLiteral("accept")) {
         if (row == -1) {
-            sounds.Play(QStringLiteral("select"));
-            if (hooks.mii_editor) {
-                hooks.mii_editor();
+            if (top_index == 0) {
+                sounds.Play(QStringLiteral("select"));
+                if (hooks.mii_editor) {
+                    hooks.mii_editor();
+                }
+            } else {
+                MultiplayerMenu();
             }
         } else if (row == 0 && !games.empty()) {
             Launch(games[game_index]);
@@ -2382,7 +2443,8 @@ void Home::Nav(const QString& cmd) {
         return;
     }
     Select();
-    if (row != was_row || game_index != was_game || button_index != was_button) {
+    if (row != was_row || game_index != was_game || button_index != was_button ||
+        top_index != was_top) {
         sounds.Play(QStringLiteral("move"));
     }
 }
@@ -2445,10 +2507,13 @@ void Home::mousePressEvent(QMouseEvent* event) {
         MenuMouse(pos, event->button());
         return;
     }
-    if (mii_rect.contains(pos) && event->button() == Qt::LeftButton) {
-        row = -1;
-        Nav(QStringLiteral("accept"));
-        return;
+    for (int i = 0; i < static_cast<int>(top_rects.size()); ++i) {
+        if (top_rects[i].contains(pos) && event->button() == Qt::LeftButton) {
+            row = -1;
+            top_index = i;
+            Nav(QStringLiteral("accept"));
+            return;
+        }
     }
     for (int i = 0; i < static_cast<int>(tile_rects.size()); ++i) {
         if (!tile_rects[i].contains(pos)) {
@@ -3017,6 +3082,13 @@ void Home::AddMenu() {
                        [this] { hooks.add_folder(); }, {}, true},
                  Entry{[] { return QStringLiteral("Juego de Switch (.nup, .nsp, .xci…)"); },
                        [this] { AddSwitchFile(); }, {}, true},
+                 Entry{[] { return QStringLiteral("Actualización o DLC de un juego de Switch"); },
+                       [this] {
+                           if (hooks.install_content) {
+                               hooks.install_content();
+                           }
+                       },
+                       {}, true},
                  Entry{[] { return QStringLiteral("Juego nativo (.exe)"); },
                        [this] { AddNative(); }, {}, true},
                  Entry{[] { return QStringLiteral("Juegos de Steam"); },
