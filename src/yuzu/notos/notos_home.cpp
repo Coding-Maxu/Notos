@@ -8,6 +8,8 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <shellapi.h>
+#include <tlhelp32.h>
 #endif
 
 #include "yuzu/notos/notos_home.h"
@@ -26,7 +28,10 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QDirIterator>
 #include <QFontMetricsF>
+#include <QImage>
+#include <QSettings>
 #include <QInputDialog>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -348,7 +353,35 @@ Home::Home(QMainWindow* window_, QBoxLayout* central, QWidget* game_list_, QWidg
     connect(native_timer, &QTimer::timeout, this, [this] {
 #ifdef _WIN32
         if (native_process && WaitForSingleObject(native_process, 0) == WAIT_OBJECT_0) {
+            // A store-started game may hand over from a launcher to the game itself: another
+            // program from its folder takes over.
+            if (!native_dir.isEmpty() && loading) {
+                CloseHandle(native_process);
+                native_process = nullptr;
+                native_window = nullptr;
+                if (FindNativeProcess()) {
+                    return;
+                }
+            }
             NativeEnded();
+            return;
+        }
+        if (!native_process && !native_dir.isEmpty()) {
+            // Steam starts it: Notos waits for it to run from its folder.
+            if (FindNativeProcess()) {
+                return;
+            }
+            if (!native_stepped_aside && native_wait.elapsed() > 8000) {
+                // Steam is starting, updating or asking something (sign-in, a licence): its
+                // windows show instead of the loading screen.
+                native_stepped_aside = true;
+                window->showMinimized();
+            }
+            if (native_wait.elapsed() > 180000) {
+                const QString name = native_name;
+                NativeEnded();
+                Message(QStringLiteral("%1 no llegó a abrirse.").arg(name));
+            }
             return;
         }
         // Games size their window again while they start (DK Bananza once its shaders are
@@ -611,6 +644,7 @@ void Home::Refresh() {
         game.exe = object.value(QStringLiteral("exe")).toString();
         game.args = object.value(QStringLiteral("args")).toString();
         game.show_console = object.value(QStringLiteral("showConsole")).toBool();
+        game.dir = object.value(QStringLiteral("dir")).toString();
         game.cover = LoadCover(object.value(QStringLiteral("cover")).toString());
         if (game.name.isEmpty()) {
             game.name = QFileInfo(game.exe).completeBaseName();
@@ -904,6 +938,11 @@ void Home::LoadingTick() {
         update();
         return;
     }
+    if (!native_process && !native_dir.isEmpty()) {
+        loading_status = QStringLiteral("Abriendo en Steam…");
+        update();
+        return;
+    }
     if (loading_phase % 10 == 1) {
         ReadNativeProgress();
     }
@@ -945,7 +984,7 @@ void Home::LoadingTick() {
 void Home::ReadNativeProgress() {
     // Recompiled ports log their shader preparation ("123 of 456 shaders"): the newest log next
     // to the game written since it started.
-    const QDir dir = QFileInfo(native_exe).absoluteDir();
+    const QDir dir = native_dir.isEmpty() ? QFileInfo(native_exe).absoluteDir() : QDir(native_dir);
     QFileInfo newest;
     for (const QString& folder : {dir.filePath(QStringLiteral("logs")), dir.absolutePath()}) {
         const QFileInfoList logs = QDir(folder).entryInfoList({QStringLiteral("*.log")},
@@ -2164,7 +2203,10 @@ void Home::Nav(const QString& cmd) {
         EndLoading();
 #ifdef _WIN32
         if (native_process) {
+            native_dir.clear(); // no other program of the game is waited for
             TerminateProcess(native_process, 1); // nothing to save yet
+        } else if (!native_dir.isEmpty()) {
+            NativeEnded(); // Steam hadn't started it yet
         }
 #endif
         return;
@@ -2446,13 +2488,16 @@ void Home::Launch(const Game& game) {
 
 void Home::LaunchNative(const Game& game) {
 #ifdef _WIN32
-    if (native_process) {
+    if (native_process || !native_dir.isEmpty()) {
         // The game already running: back to it. Another one: it has to close first.
         if (game.exe != native_exe) {
             Message(QStringLiteral("%1 sigue abierto. Ciérralo desde su menú Home antes de abrir "
                                    "otro juego.")
                         .arg(native_name));
             return;
+        }
+        if (!native_process) {
+            return; // still starting
         }
         if (HWND game_window = NativeWindow(native_process)) {
             ShowWindowAsync(game_window, IsIconic(game_window) ? SW_RESTORE : SW_SHOW);
@@ -2461,37 +2506,56 @@ void Home::LaunchNative(const Game& game) {
         window->showMinimized();
         return;
     }
-    const QFileInfo info(game.exe);
-    if (!info.isFile()) {
-        Message(QStringLiteral("No se encontró %1").arg(QDir::toNativeSeparators(game.exe)));
-        return;
+    if (!game.dir.isEmpty()) {
+        // A store's game: the store starts it (its overlay, cloud saves and DRM with it), then
+        // Notos finds it running from its folder.
+        if (!QFileInfo(game.dir).isDir()) {
+            Message(QStringLiteral("No se encontró %1").arg(QDir::toNativeSeparators(game.dir)));
+            return;
+        }
+        if (reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open",
+                                                    game.exe.toStdWString().c_str(), nullptr,
+                                                    nullptr, SW_SHOWNORMAL)) <= 32) {
+            Message(QStringLiteral("No se pudo abrir %1.").arg(game.name));
+            return;
+        }
+        native_process = nullptr;
+        native_dir = QDir::cleanPath(QFileInfo(game.dir).absoluteFilePath());
+        native_wait.start();
+    } else {
+        const QFileInfo info(game.exe);
+        if (!info.isFile()) {
+            Message(QStringLiteral("No se encontró %1").arg(QDir::toNativeSeparators(game.exe)));
+            return;
+        }
+        std::wstring exe = QDir::toNativeSeparators(info.absoluteFilePath()).toStdWString();
+        std::wstring dir = QDir::toNativeSeparators(info.absolutePath()).toStdWString();
+        std::wstring command = L"\"" + exe + L"\"";
+        if (!game.args.isEmpty()) {
+            command += L" " + game.args.toStdWString();
+        }
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION process{};
+        // A console program starts without its console window unless the player wants it.
+        const DWORD flags = game.show_console ? 0 : CREATE_NO_WINDOW;
+        if (!CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr, FALSE, flags, nullptr,
+                            dir.c_str(), &startup, &process)) {
+            Message(QStringLiteral("No se pudo abrir %1 (error %2).")
+                        .arg(game.name)
+                        .arg(static_cast<qulonglong>(GetLastError())));
+            return;
+        }
+        CloseHandle(process.hThread);
+        native_process = process.hProcess;
+        native_played.start();
     }
-    std::wstring exe = QDir::toNativeSeparators(info.absoluteFilePath()).toStdWString();
-    std::wstring dir = QDir::toNativeSeparators(info.absolutePath()).toStdWString();
-    std::wstring command = L"\"" + exe + L"\"";
-    if (!game.args.isEmpty()) {
-        command += L" " + game.args.toStdWString();
-    }
-    STARTUPINFOW startup{};
-    startup.cb = sizeof(startup);
-    PROCESS_INFORMATION process{};
-    // A console program starts without its console window unless the player wants it.
-    const DWORD flags = game.show_console ? 0 : CREATE_NO_WINDOW;
-    if (!CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr, FALSE, flags, nullptr,
-                        dir.c_str(), &startup, &process)) {
-        Message(QStringLiteral("No se pudo abrir %1 (error %2).")
-                    .arg(game.name)
-                    .arg(static_cast<qulonglong>(GetLastError())));
-        return;
-    }
-    CloseHandle(process.hThread);
-    native_process = process.hProcess;
     native_exe = game.exe;
     native_name = game.name;
     native_window = nullptr;
     native_ping_out = false;
     native_ready = false;
-    native_played.start();
+    native_stepped_aside = false;
     native_timer->start();
     // The loading screen until the game's window shows (LoadingTick).
     CloseMenu();
@@ -2538,6 +2602,7 @@ void Home::NativeEnded() {
     }
     native_exe.clear();
     native_name.clear();
+    native_dir.clear();
     ShowNotos();
     if (was_closing) {
         EndClosing();
@@ -2545,6 +2610,191 @@ void Home::NativeEnded() {
         running_game = {};
         StartReveal();
     }
+}
+
+bool Home::FindNativeProcess() {
+#ifdef _WIN32
+    // The newest program running from the game's folder (a launcher may come first).
+    const QString folder = QDir::toNativeSeparators(native_dir) + QLatin1Char('\\');
+    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    HANDLE found = nullptr;
+    FILETIME newest{};
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    for (BOOL more = Process32FirstW(snapshot, &entry); more;
+         more = Process32NextW(snapshot, &entry)) {
+        const HANDLE process =
+            OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE | PROCESS_TERMINATE |
+                            PROCESS_SUSPEND_RESUME,
+                        FALSE, entry.th32ProcessID);
+        if (!process) {
+            continue;
+        }
+        wchar_t path[MAX_PATH * 2];
+        DWORD size = static_cast<DWORD>(std::size(path));
+        FILETIME created{}, exited{}, kernel{}, user{};
+        if (QueryFullProcessImageNameW(process, 0, path, &size) &&
+            QString::fromWCharArray(path, static_cast<int>(size))
+                .startsWith(folder, Qt::CaseInsensitive) &&
+            GetProcessTimes(process, &created, &exited, &kernel, &user) &&
+            (!found || CompareFileTime(&created, &newest) > 0)) {
+            if (found) {
+                CloseHandle(found);
+            }
+            found = process;
+            newest = created;
+            continue;
+        }
+        CloseHandle(process);
+    }
+    CloseHandle(snapshot);
+    if (!found) {
+        return false;
+    }
+    native_process = found;
+    if (!native_played.isValid()) {
+        native_played.start(); // the time played counts from the game, not from Steam's start
+    }
+    native_window = nullptr;
+    native_ping_out = false;
+    native_ready = false;
+    return true;
+#else
+    return false;
+#endif
+}
+
+void Home::AddSteam() {
+    // Steam's installed games: its library folders, each game's manifest, and the art Steam
+    // keeps for its library (no download).
+    const QString steam = QDir::cleanPath(
+        QSettings(QStringLiteral("HKEY_CURRENT_USER\\Software\\Valve\\Steam"),
+                  QSettings::NativeFormat)
+            .value(QStringLiteral("SteamPath"))
+            .toString());
+    if (steam.isEmpty() || !QDir(steam).exists()) {
+        Message(QStringLiteral("No se encontró Steam en este PC."));
+        return;
+    }
+    QStringList libraries{steam};
+    if (QFile vdf(steam + QStringLiteral("/steamapps/libraryfolders.vdf"));
+        vdf.open(QFile::ReadOnly)) {
+        static const QRegularExpression path(QStringLiteral("\"path\"\\s+\"([^\"]+)\""));
+        for (auto it = path.globalMatch(QString::fromUtf8(vdf.readAll())); it.hasNext();) {
+            QString library = it.next().captured(1);
+            library.replace(QStringLiteral("\\\\"), QStringLiteral("\\"));
+            library = QDir::cleanPath(library);
+            if (!libraries.contains(library, Qt::CaseInsensitive)) {
+                libraries.push_back(library);
+            }
+        }
+    }
+    QJsonArray natives = config.value(QStringLiteral("native")).toArray();
+    std::set<QString> known;
+    for (const QJsonValue& value : natives) {
+        known.insert(value.toObject().value(QStringLiteral("exe")).toString());
+    }
+    const QString art_dir = QFileInfo(ConfigPath()).absolutePath() + QStringLiteral("/notos_icons");
+    QDir().mkpath(art_dir);
+    const auto field = [](const QString& text, const char* key) {
+        const QRegularExpression re(QStringLiteral("\"%1\"\\s+\"([^\"]*)\"").arg(QLatin1String(key)),
+                                    QRegularExpression::CaseInsensitiveOption);
+        return re.match(text).captured(1);
+    };
+    int added = 0;
+    for (const QString& library : libraries) {
+        const QDir apps(library + QStringLiteral("/steamapps"));
+        for (const QFileInfo& manifest :
+             apps.entryInfoList({QStringLiteral("appmanifest_*.acf")}, QDir::Files)) {
+            QFile file(manifest.absoluteFilePath());
+            if (!file.open(QFile::ReadOnly)) {
+                continue;
+            }
+            const QString text = QString::fromUtf8(file.readAll());
+            const QString appid = field(text, "appid");
+            const QString name = field(text, "name");
+            const QString folder = apps.filePath(QStringLiteral("common/") + field(text, "installdir"));
+            // Tools Steam installs alongside games (redistributables) are no games.
+            if (appid.isEmpty() || appid == QStringLiteral("228980") || !QDir(folder).exists()) {
+                continue;
+            }
+            const QString link = QStringLiteral("steam://rungameid/") + appid;
+            if (!known.insert(link).second) {
+                continue;
+            }
+            natives.append(QJsonObject{{QStringLiteral("name"), name},
+                                       {QStringLiteral("exe"), link},
+                                       {QStringLiteral("dir"), QDir::toNativeSeparators(folder)},
+                                       {QStringLiteral("args"), QString()},
+                                       {QStringLiteral("showConsole"), false},
+                                       {QStringLiteral("cover"), SteamCover(steam, appid, art_dir)}});
+            ++added;
+        }
+    }
+    config.insert(QStringLiteral("native"), natives);
+    SaveConfig();
+    Refresh();
+    Message(added == 0   ? QStringLiteral("No hay juegos de Steam nuevos para agregar.")
+            : added == 1 ? QStringLiteral("Se agregó 1 juego de Steam.")
+                         : QStringLiteral("Se agregaron %1 juegos de Steam.").arg(added));
+}
+
+QString Home::SteamCover(const QString& steam, const QString& appid, const QString& art_dir) {
+    // Steam keeps each game's library art under appcache/librarycache/<appid>, in subfolders
+    // named by hash in newer versions.
+    QString hero, logo, capsule, header;
+    QDirIterator it(steam + QStringLiteral("/appcache/librarycache/") + appid, QDir::Files,
+                    QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        const QString file = it.next();
+        const QString name = QFileInfo(file).fileName().toLower();
+        if (name == QStringLiteral("library_hero.jpg")) {
+            hero = file;
+        } else if (name == QStringLiteral("logo.png")) {
+            logo = file;
+        } else if (name == QStringLiteral("library_600x900.jpg") ||
+                   name == QStringLiteral("library_capsule.jpg")) {
+            capsule = file;
+        } else if (name == QStringLiteral("library_header.jpg") ||
+                   name == QStringLiteral("header.jpg")) {
+            header = file;
+        }
+    }
+    // A square cover like the others: the game's wide art with its logo over it.
+    if (QImage background(hero.isEmpty() ? header : hero); !background.isNull()) {
+        constexpr int Size = 600;
+        QImage cover(Size, Size, QImage::Format_ARGB32_Premultiplied);
+        QPainter p(&cover);
+        p.setRenderHint(QPainter::SmoothPixmapTransform);
+        p.setRenderHint(QPainter::Antialiasing);
+        const double scale = std::max(static_cast<double>(Size) / background.width(),
+                                      static_cast<double>(Size) / background.height());
+        const QSizeF drawn = QSizeF(background.size()) * scale;
+        p.drawImage(QRectF((Size - drawn.width()) / 2, (Size - drawn.height()) / 2, drawn.width(),
+                           drawn.height()),
+                    background);
+        if (QImage mark(logo); !mark.isNull()) {
+            QLinearGradient shade(0, Size * 0.45, 0, Size);
+            shade.setColorAt(0, QColor(0, 0, 0, 0));
+            shade.setColorAt(1, QColor(0, 0, 0, 150));
+            p.fillRect(QRectF(0, 0, Size, Size), shade);
+            const QSizeF box(Size * 0.8, Size * 0.4);
+            const double fit = std::min(box.width() / mark.width(), box.height() / mark.height());
+            const QSizeF size = QSizeF(mark.size()) * fit;
+            p.drawImage(QRectF((Size - size.width()) / 2, Size * 0.92 - size.height(),
+                               size.width(), size.height()),
+                        mark);
+        }
+        p.end();
+        const QString path = QStringLiteral("%1/steam_%2.png").arg(art_dir, appid);
+        if (cover.save(path, "PNG")) {
+            return QDir::toNativeSeparators(path);
+        }
+    }
+    return QDir::toNativeSeparators(capsule.isEmpty() ? header : capsule);
 }
 
 u64 Home::PlayTimeOf(const Game& game) const {
@@ -2626,6 +2876,8 @@ void Home::AddMenu() {
                        [this] { AddSwitchFile(); }, {}, true},
                  Entry{[] { return QStringLiteral("Juego nativo (.exe)"); },
                        [this] { AddNative(); }, {}, true},
+                 Entry{[] { return QStringLiteral("Juegos de Steam"); },
+                       [this] { AddSteam(); }, {}, true},
                  Entry{[] { return QStringLiteral("Importar juegos del Recomp Launcher"); },
                        [this] { ImportLauncher(); }, {}, true},
              });

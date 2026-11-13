@@ -150,6 +150,9 @@ private:
         bool native = false;
         QString exe;  ///< native: the program
         QString args; ///< native: its arguments
+        /// native: the game's folder when a store starts it (exe is then the store's link, such as
+        /// steam://rungameid/...): its process is found there.
+        QString dir;
         bool show_console = false;
         QString path; ///< Switch: the game file
         u64 program_id = 0;
@@ -204,6 +207,11 @@ private:
     // Actions
     void AddNative();
     void AddSwitchFile();
+    void AddSteam();
+    /// A square cover from Steam's library art for the game (its path), or Steam's own picture.
+    static QString SteamCover(const QString& steam, const QString& appid, const QString& art_dir);
+    /// A store-started game's process, once it runs from its folder: takes it as the native game.
+    bool FindNativeProcess();
     void RemoveSwitchFile(const QString& path);
     void ImportLauncher();
     void PickCover(const Game& game);
@@ -285,6 +293,9 @@ private:
     void* native_process = nullptr;
     QString native_exe;
     QString native_name;
+    QString native_dir;        ///< a store-started game's folder, while Notos looks for it
+    QElapsedTimer native_wait; ///< since Notos asked the store to start it
+    bool native_stepped_aside = false; ///< Notos minimized for the store's own windows
     bool native_menu = false;      ///< the Home menu shows over the native game
     bool native_suspended = false; ///< its process is paused for the menu
     void* native_window = nullptr; ///< the game's window once it shows (HWND)
