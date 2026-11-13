@@ -42,7 +42,8 @@ void DebugPad::OnUpdate(const Core::Timing::CoreTiming& core_timing) {
     const auto& last_entry = shared_memory.debug_pad_lifo.ReadCurrentEntry().state;
     next_state.sampling_number = last_entry.sampling_number + 1;
 
-    if (Settings::values.debug_pad_enabled) {
+    if (Settings::values.debug_pad_enabled &&
+        !Core::HID::EmulatedController::GameInputBlocked()) {
         next_state.attribute.connected.Assign(1);
 
         const auto& button_state = controller->GetDebugPadButtons();

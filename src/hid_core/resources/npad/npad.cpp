@@ -446,8 +446,11 @@ void NPad::RequestPadStateUpdate(Kernel::KernelCore& kernel, u64 aruid, Core::HI
 
     auto& pad_entry = controller.npad_pad_state;
     auto& trigger_entry = controller.npad_trigger_state;
-    const auto button_state = controller.device->GetNpadButtons();
-    const auto stick_state = controller.device->GetSticks();
+    // Notos: nothing reaches the game while its Home menu shows.
+    const bool blocked = Core::HID::EmulatedController::GameInputBlocked();
+    const auto button_state =
+        blocked ? Core::HID::NpadButtonState{} : controller.device->GetNpadButtons();
+    const auto stick_state = blocked ? Core::HID::AnalogSticks{} : controller.device->GetSticks();
 
     using btn = Core::HID::NpadButton;
     pad_entry.npad_buttons.raw = btn::None;
@@ -480,7 +483,8 @@ void NPad::RequestPadStateUpdate(Kernel::KernelCore& kernel, u64 aruid, Core::HI
     }
 
     if (controller_type == Core::HID::NpadStyleIndex::GameCube) {
-        const auto& trigger_state = controller.device->GetTriggers();
+        const auto trigger_state =
+            blocked ? Core::HID::NpadGcTriggerState{} : controller.device->GetTriggers();
         trigger_entry.l_analog = trigger_state.left;
         trigger_entry.r_analog = trigger_state.right;
         pad_entry.npad_buttons.zl.Assign(false);

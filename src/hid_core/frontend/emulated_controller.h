@@ -363,6 +363,11 @@ public:
     /// Whether the debug server's injector is installed.
     bool HasInputInjector() const;
 
+    /// Notos: while its Home menu shows over the game, the game sees every controller idle (the
+    /// menu itself still reads them with GetNpadButtons).
+    static void SetGameInputBlocked(bool blocked);
+    static bool GameInputBlocked();
+
     /// Returns the latest status of motion input from the mouse
     MotionState GetMotions() const;
 

@@ -348,6 +348,9 @@ private:
     Overlay* overlay = nullptr;
     QTimer* overlay_timer = nullptr;
     bool paused_by_menu = false;
+    /// The menu closed: the game gets the controllers back once every button is let go.
+    bool unblock_on_release = false;
+    void BlockGameInput(bool block);
     bool home_down = false;  ///< the gamepad's Home button is held
     bool home_combo = false; ///< another button was pressed with it (a hotkey like Home+B)
 };

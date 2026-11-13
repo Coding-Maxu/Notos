@@ -912,6 +912,8 @@ void Home::Restore() {
 
 void Home::OnEmulationStarting() {
     intro_pending = false; // no opening after a game (Notos started straight into one)
+    unblock_on_release = false;
+    Core::HID::EmulatedController::SetGameInputBlocked(false);
     if (!hooks.single_window()) {
         loading_game = {};
         return;
@@ -983,11 +985,21 @@ void Home::OnEmulationStopping() {
     }
 }
 
+void Home::BlockGameInput(bool block) {
+    if (block) {
+        unblock_on_release = false;
+        Core::HID::EmulatedController::SetGameInputBlocked(true);
+    } else if (Core::HID::EmulatedController::GameInputBlocked()) {
+        unblock_on_release = true; // PollPad, once nothing is held
+    }
+}
+
 // ---- closing a game
 
 void Home::StartClosing(bool emulated) {
     menu.clear();
     paused_by_menu = false;
+    BlockGameInput(false);
     closing = true;
     closing_emulated = emulated;
     closing_start = anim_clock.elapsed();
@@ -1417,6 +1429,7 @@ void Home::LeaveGameMenu(bool resume) {
 #endif
         return;
     }
+    BlockGameInput(false);
     if (resume && paused_by_menu && hooks.emulation_running()) {
         hooks.resume();
     }
@@ -1566,6 +1579,7 @@ void Home::ToggleGameMenu() {
     }
     // The menu shows over the game, which goes on running underneath.
     paused_by_menu = false;
+    BlockGameInput(true);
     GameMenuEntries();
     sounds.Play(QStringLiteral("select"));
     PlaceOverlay();
@@ -1591,6 +1605,7 @@ void Home::GameMenuEntries() {
             if (open) {
                 open();
             }
+            BlockGameInput(false);
             if (resume && hooks.emulation_running()) {
                 hooks.resume();
             }
@@ -2641,6 +2656,10 @@ void Home::PollPad() {
         overlay->update();
     }
     pad_held = buttons;
+    if (unblock_on_release && buttons == 0 && controller->GetHomeButtons().home.Value() == 0) {
+        unblock_on_release = false;
+        Core::HID::EmulatedController::SetGameInputBlocked(false);
+    }
 
     // Home pressed and let go on its own opens or closes the Home menu during a game; Home with
     // another button is one of the emulator's hotkeys (Home+B fullscreen...) and does not.

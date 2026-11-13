@@ -1855,6 +1855,18 @@ void EmulatedController::SetInputInjector(InputInjector injector_) {
     has_injector.store(static_cast<bool>(injector), std::memory_order_release);
 }
 
+namespace {
+std::atomic<bool> game_input_blocked{};
+}
+
+void EmulatedController::SetGameInputBlocked(bool blocked) {
+    game_input_blocked.store(blocked, std::memory_order_release);
+}
+
+bool EmulatedController::GameInputBlocked() {
+    return game_input_blocked.load(std::memory_order_acquire);
+}
+
 bool EmulatedController::HasInputInjector() const {
     return has_injector.load(std::memory_order_acquire);
 }
