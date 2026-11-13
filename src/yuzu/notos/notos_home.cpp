@@ -2272,6 +2272,7 @@ void Home::Nav(const QString& cmd) {
         update();
         return;
     }
+    const int was_row = row, was_game = game_index, was_button = button_index;
     if (cmd == QStringLiteral("left") || cmd == QStringLiteral("right")) {
         const int d = cmd == QStringLiteral("left") ? -1 : 1;
         if (row == 0) {
@@ -2304,7 +2305,6 @@ void Home::Nav(const QString& cmd) {
         GameMenu();
         return;
     }
-    const int was_row = row, was_game = game_index, was_button = button_index;
     Select();
     if (row != was_row || game_index != was_game || button_index != was_button) {
         sounds.Play(QStringLiteral("move"));
