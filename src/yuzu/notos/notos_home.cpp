@@ -355,13 +355,15 @@ Home::Home(QMainWindow* window_, QBoxLayout* central, QWidget* game_list_, QWidg
         if (native_process && WaitForSingleObject(native_process, 0) == WAIT_OBJECT_0) {
             // A store-started game may hand over from a launcher to the game itself: another
             // program from its folder takes over.
-            if (!native_dir.isEmpty() && loading) {
+            // The launcher may close a moment before the game shows: Notos waits for it.
+            if (!native_dir.isEmpty() && !closing) {
                 CloseHandle(native_process);
                 native_process = nullptr;
                 native_window = nullptr;
-                if (FindNativeProcess()) {
-                    return;
+                if (!FindNativeProcess()) {
+                    native_handover.start();
                 }
+                return;
             }
             NativeEnded();
             return;
@@ -369,6 +371,13 @@ Home::Home(QMainWindow* window_, QBoxLayout* central, QWidget* game_list_, QWidg
         if (!native_process && !native_dir.isEmpty()) {
             // Steam starts it: Notos waits for it to run from its folder.
             if (FindNativeProcess()) {
+                native_handover.invalidate();
+                return;
+            }
+            if (native_handover.isValid()) {
+                if (native_handover.elapsed() > 12000) {
+                    NativeEnded(); // nothing came after: the game is over
+                }
                 return;
             }
             if (!native_stepped_aside && native_wait.elapsed() > 8000) {
@@ -2556,6 +2565,7 @@ void Home::LaunchNative(const Game& game) {
     native_ping_out = false;
     native_ready = false;
     native_stepped_aside = false;
+    native_handover.invalidate();
     native_timer->start();
     // The loading screen until the game's window shows (LoadingTick).
     CloseMenu();
@@ -2603,6 +2613,7 @@ void Home::NativeEnded() {
     native_exe.clear();
     native_name.clear();
     native_dir.clear();
+    native_handover.invalidate();
     ShowNotos();
     if (was_closing) {
         EndClosing();

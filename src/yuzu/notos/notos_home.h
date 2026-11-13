@@ -296,6 +296,7 @@ private:
     QString native_dir;        ///< a store-started game's folder, while Notos looks for it
     QElapsedTimer native_wait; ///< since Notos asked the store to start it
     bool native_stepped_aside = false; ///< Notos minimized for the store's own windows
+    QElapsedTimer native_handover; ///< its program closed: whether another one follows
     bool native_menu = false;      ///< the Home menu shows over the native game
     bool native_suspended = false; ///< its process is paused for the menu
     void* native_window = nullptr; ///< the game's window once it shows (HWND)
