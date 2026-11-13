@@ -30,6 +30,7 @@
 #include <QFileInfo>
 #include <QDirIterator>
 #include <QFontMetricsF>
+#include <QFontDatabase>
 #include <QImage>
 #include <QSettings>
 #include <QInputDialog>
@@ -312,6 +313,12 @@ Home::Home(QMainWindow* window_, QBoxLayout* central, QWidget* game_list_, QWidg
     : QWidget(window_), window{window_}, game_list{game_list_}, placeholder{placeholder_},
       hooks{std::move(hooks_)} {
     setObjectName(QStringLiteral("NotosHome"));
+    // The launcher's own type (the emulator's dialogs keep Inter).
+    for (const char* weight : {"Regular", "Medium", "SemiBold", "Bold"}) {
+        QFontDatabase::addApplicationFont(
+            QStringLiteral(":/fritchii/fonts/Montserrat-%1.ttf").arg(QLatin1String(weight)));
+    }
+    setFont(QFont(QStringLiteral("Montserrat")));
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(false);
     central->addWidget(this, 1);

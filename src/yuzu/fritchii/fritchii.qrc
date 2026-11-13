@@ -4,6 +4,10 @@
         <file>whats-new.md</file>
         <file>fonts/Inter-Regular.ttf</file>
         <file>fonts/Inter-Medium.ttf</file>
+        <file>fonts/Montserrat-Regular.ttf</file>
+        <file>fonts/Montserrat-Medium.ttf</file>
+        <file>fonts/Montserrat-SemiBold.ttf</file>
+        <file>fonts/Montserrat-Bold.ttf</file>
         <file>icons/library.svg</file>
         <file>icons/settings.svg</file>
         <file>icons/help.svg</file>
