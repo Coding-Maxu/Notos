@@ -768,15 +768,15 @@ void Home::Refresh() {
         }
     }
 
-    // The most recently played to the right; those never played from here stay on the left in
-    // their order.
+    // The most recently played first, on the left; those never played from here follow in their
+    // order.
     const QJsonObject played = config.value(QStringLiteral("lastPlayed")).toObject();
     const auto last_played = [&played](const Game& game) {
         return static_cast<qint64>(
             played.value(game.native ? game.exe : game.path).toDouble());
     };
     std::stable_sort(games.begin(), games.end(), [&](const Game& a, const Game& b) {
-        return last_played(a) < last_played(b);
+        return last_played(a) > last_played(b);
     });
 
     for (int i = 0; i < static_cast<int>(games.size()); ++i) {
@@ -786,9 +786,7 @@ void Home::Refresh() {
     }
     if (was_empty && !games.empty()) {
         row = 0; // the games just arrived: start on the covers, at the last one played
-        if (last_played(games.back()) > 0) {
-            game_index = static_cast<int>(games.size()) - 1;
-        }
+        game_index = 0;
     }
     Select();
 }
