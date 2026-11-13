@@ -57,6 +57,7 @@
 #include "common/fs/path_util.h"
 #include "hid_core/frontend/emulated_controller.h"
 #include "qt_common/game_list/game_list_p.h"
+#include "qt_common/qt_common.h"
 #include "yuzu/fritchii/fritchii_ui.h"
 
 namespace Notos {
@@ -118,6 +119,26 @@ QString ConfigPath() {
 
 QColor Hsv(double hue, double saturation, double value) {
     return QColor::fromHsvF(std::fmod(hue, 360.0) / 360.0, saturation, value);
+}
+
+/// A loose ExeFS dump (<folder>/[base|update|<id>]/exefs) whose folder also holds packaged
+/// games: the game list names it after that folder, which is a library, not a game.
+bool IsStrayDump(const QString& path) {
+    // The game list keeps the exefs folder as the path (the main file elsewhere).
+    const QFileInfo info(path);
+    QDir dir = info.fileName() == QStringLiteral("main") ? info.dir() : QDir(path);
+    if (dir.dirName().compare(QStringLiteral("exefs"), Qt::CaseInsensitive) != 0 || !dir.cdUp()) {
+        return false;
+    }
+    static const QRegularExpression storage(QStringLiteral("^(base|update|updates|[0-9a-fA-F]+)$"),
+                                            QRegularExpression::CaseInsensitiveOption);
+    while (storage.match(dir.dirName()).hasMatch() && dir.cdUp()) {
+    }
+    QStringList packaged;
+    for (const QString& extension : QtCommon::supported_file_extensions) {
+        packaged << QStringLiteral("*.") + extension;
+    }
+    return !dir.entryList(packaged, QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot).isEmpty();
 }
 
 QPixmap LoadCover(const QString& path) {
@@ -706,7 +727,7 @@ void Home::Refresh() {
             return;
         }
         const QString path = item->data(GameListItemPath::FullPathRole).toString();
-        if (path.isEmpty() || !seen.insert(path).second) {
+        if (path.isEmpty() || IsStrayDump(path) || !seen.insert(path).second) {
             return;
         }
         Game game;
