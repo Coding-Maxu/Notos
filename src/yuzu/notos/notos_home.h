@@ -63,6 +63,8 @@ struct HomeHooks {
     /// A game file's title, icon and program id, read from the file itself (false: not a game).
     std::function<bool(const QString& path, QString& name, QByteArray& icon, u64& program_id)>
         read_game;
+    /// Seconds a Switch game has been played (the emulator's own count).
+    std::function<u64(u64 program_id)> play_time;
 };
 
 class Home;
@@ -209,6 +211,8 @@ private:
     void MoveNative(int index, int delta);
     void RemoveNative(int index);
     int NativeIndex(const Game& game) const;
+    u64 PlayTimeOf(const Game& game) const;
+    static QString PlayTimeText(u64 seconds);
 
     QMainWindow* window;
     QWidget* game_list;
@@ -285,6 +289,7 @@ private:
     bool native_suspended = false; ///< its process is paused for the menu
     void* native_window = nullptr; ///< the game's window once it shows (HWND)
     QElapsedTimer native_window_seen;
+    QElapsedTimer native_played; ///< since the native game started, for its time played
     // Whether the game's window answers messages yet (it doesn't while the game loads).
     QElapsedTimer native_ping;
     bool native_ping_out = false;

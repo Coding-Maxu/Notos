@@ -26,6 +26,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFontMetricsF>
 #include <QInputDialog>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -1266,7 +1267,7 @@ void Home::ToggleNativeMenu() {
     }
 #endif
     overlay->activateWindow();
-    SuspendNative(true);
+    // The game goes on running under the menu.
     overlay_timer->start();
     qApp->installEventFilter(this);
 }
@@ -1362,10 +1363,8 @@ void Home::ToggleGameMenu() {
     if (!hooks.emulation_running() || QApplication::activeModalWidget()) {
         return;
     }
-    paused_by_menu = hooks.game_running && hooks.game_running();
-    if (paused_by_menu) {
-        hooks.pause();
-    }
+    // The menu shows over the game, which goes on running underneath.
+    paused_by_menu = false;
     GameMenuEntries();
     PlaceOverlay();
     overlay->show();
@@ -1737,13 +1736,31 @@ void Home::paintEvent(QPaintEvent*) {
                        game.name);
         }
         p.restore();
-        // Under the cover: "Emulado" for a Switch game; nothing for a native one.
-        if (!game.native) {
-            p.setPen(sub);
+        // Under the cover: a clock and the time played.
+        {
+            p.save();
             p.setFont(Font(font(), HintSize * s, QFont::Medium));
-            p.drawText(QRectF(outer_rect.left(), outer_rect.bottom() + TileGap * s,
-                              outer_rect.width(), label_h),
-                       Qt::AlignHCenter | Qt::AlignTop, QStringLiteral("Emulado"));
+            const QString text = PlayTimeText(PlayTimeOf(game));
+            const QFontMetricsF metrics(p.font());
+            const double icon = metrics.ascent() * 0.95;
+            const double gap = icon * 0.45;
+            const double width = icon + gap + metrics.horizontalAdvance(text);
+            const double top = outer_rect.bottom() + TileGap * s;
+            const double left = outer_rect.center().x() - width / 2;
+            const QRectF dial(left, top + (metrics.height() - icon) / 2, icon, icon);
+            p.setRenderHint(QPainter::Antialiasing);
+            QPen pen(sub, std::max(1.0, icon * 0.11));
+            pen.setCapStyle(Qt::RoundCap);
+            p.setPen(pen);
+            p.setBrush(Qt::NoBrush);
+            p.drawEllipse(dial.adjusted(pen.widthF() / 2, pen.widthF() / 2, -pen.widthF() / 2,
+                                        -pen.widthF() / 2));
+            const QPointF centre = dial.center();
+            p.drawLine(centre, centre + QPointF(0, -icon * 0.30));
+            p.drawLine(centre, centre + QPointF(icon * 0.22, 0));
+            p.drawText(QRectF(left + icon + gap, top, width, label_h),
+                       Qt::AlignLeft | Qt::AlignTop, text);
+            p.restore();
         }
     };
     // The selected cover last: it grows over its neighbours.
@@ -2474,6 +2491,7 @@ void Home::LaunchNative(const Game& game) {
     native_window = nullptr;
     native_ping_out = false;
     native_ready = false;
+    native_played.start();
     native_timer->start();
     // The loading screen until the game's window shows (LoadingTick).
     CloseMenu();
@@ -2509,6 +2527,15 @@ void Home::NativeEnded() {
     }
 #endif
     native_suspended = false;
+    if (native_played.isValid() && !native_exe.isEmpty()) {
+        // Notos keeps a native game's time played itself (the emulator only knows its own).
+        QJsonObject times = config.value(QStringLiteral("playTime")).toObject();
+        times.insert(native_exe, static_cast<qint64>(times.value(native_exe).toInteger() +
+                                                      native_played.elapsed() / 1000));
+        config.insert(QStringLiteral("playTime"), times);
+        SaveConfig();
+        native_played.invalidate();
+    }
     native_exe.clear();
     native_name.clear();
     ShowNotos();
@@ -2518,6 +2545,31 @@ void Home::NativeEnded() {
         running_game = {};
         StartReveal();
     }
+}
+
+u64 Home::PlayTimeOf(const Game& game) const {
+    if (game.native) {
+        u64 seconds = static_cast<u64>(
+            config.value(QStringLiteral("playTime")).toObject().value(game.exe).toInteger());
+        if (native_played.isValid() && game.exe == native_exe) {
+            seconds += static_cast<u64>(native_played.elapsed() / 1000); // running now
+        }
+        return seconds;
+    }
+    return hooks.play_time && game.program_id != 0 ? hooks.play_time(game.program_id) : 0;
+}
+
+QString Home::PlayTimeText(u64 seconds) {
+    if (seconds < 60) {
+        return QStringLiteral("Sin jugar");
+    }
+    const u64 hours = seconds / 3600;
+    const u64 minutes = seconds % 3600 / 60;
+    if (hours == 0) {
+        return QStringLiteral("%1 min").arg(minutes);
+    }
+    return minutes == 0 ? QStringLiteral("%1 h").arg(hours)
+                        : QStringLiteral("%1 h %2 min").arg(hours).arg(minutes);
 }
 
 void Home::ShowNotos() {

@@ -14,6 +14,7 @@
 #include "core/core.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/loader/loader.h"
+#include "frontend_common/play_time_manager.h"
 #include "qt_common/qt_common.h"
 #include "qt_common/util/game.h"
 #include "ui_main.h"
@@ -238,6 +239,7 @@ void MainWindow::SetUpFritchiiUi() {
                 }
                 return true;
             },
+        .play_time = [this](u64 program_id) { return play_time_manager->GetPlayTime(program_id); },
     };
     // Notos: the launcher-style home screen in place of Fritchii's (FritchiiUi::Home).
     auto* notos_home = new Notos::Home(this, ui->horizontalLayout, game_list,
