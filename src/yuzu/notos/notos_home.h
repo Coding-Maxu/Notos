@@ -130,6 +130,7 @@ private:
     void PaintMenu(QPainter& p, const QRect& area);
     /// The loading screen: the game's cover, its name and a bar.
     void PaintLoading(QPainter& p, const QRect& area);
+    void ResetLoadingScreen(); ///< the loading (or closing) screen comes up now
     void LoadingTick();
     void ReadNativeProgress();
     void EndLoading();
@@ -212,6 +213,8 @@ private:
     void Select();
     void PollPad();
     void Launch(const Game& game);
+    /// The chosen cover answers (a press, a shine across it) while the rest fades; then Launch.
+    void BeginLaunch(const Game& game);
     void LaunchNative(const Game& game);
     void NativeEnded();
 
@@ -346,6 +349,17 @@ private:
     QString loading_status;
     QDateTime launch_time;
     QTimer* loading_timer = nullptr;
+    qint64 loading_start = 0;  ///< anim_clock when the loading screen came up
+    double loading_shown = 0;  ///< the ring's share, gliding to loading_progress
+    QPixmap loading_backdrop;  ///< the game's art blurred over the screen
+    QString loading_backdrop_key;
+    QString status_key, status_prev, status_now; ///< the status line fading between steps
+    qint64 status_changed = 0;
+    // A game was chosen: its cover's answer plays before it starts.
+    bool launching = false;
+    qint64 launch_start = 0;
+    int launch_index = -1;
+    Game launch_game;
 
     // The Home menu over a running game.
     Overlay* overlay = nullptr;

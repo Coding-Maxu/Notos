@@ -79,6 +79,8 @@ constexpr std::array<std::pair<const char*, const char*>, 7> Accents{{
 // The opening sequence, in milliseconds: the emblem alone, then it flies to its corner while the
 // home screen comes in.
 constexpr double IntroMerge = 1700, IntroMergeTime = 700, IntroUi = 2050, IntroTotal = 3300;
+// Choosing a game, in milliseconds: its cover's answer, then the loading screen.
+constexpr int LaunchTime = 520;
 
 double Clamp01(double x) {
     return std::clamp(x, 0.0, 1.0);
@@ -720,7 +722,7 @@ void Home::AnimTick() {
         }
     }
     // The rainbow alone turns slowly: a few frames a second are enough.
-    if (moving || loading || (Rainbow() && anim_ticks % 3 == 0)) {
+    if (moving || loading || launching || closing || (Rainbow() && anim_ticks % 3 == 0)) {
         update();
     }
 }
@@ -929,6 +931,7 @@ void Home::OnEmulationStarting() {
         loading_phase = 0;
         loading_progress = -1;
         loading_status = QStringLiteral("Iniciando…");
+        ResetLoadingScreen();
         loading_timer->start();
         qApp->installEventFilter(this);
     }
@@ -1010,6 +1013,7 @@ void Home::StartClosing(bool emulated) {
     }
     loading_progress = -1;
     loading_status = QStringLiteral("Cerrando…");
+    ResetLoadingScreen();
     if (emulated) {
         // Over the whole screen: the window leaves its game size underneath.
         PlaceOverlay();
@@ -1090,6 +1094,7 @@ void Home::LoadingTick() {
     if (loading_emulated) {
         PlaceOverlay();
         if (!overlay->isVisible()) {
+            loading_start = anim_clock.elapsed(); // it comes in from now
             overlay->show();
         }
         overlay->raise();
@@ -1208,13 +1213,21 @@ void Home::EndLoading() {
     update();
 }
 
+void Home::ResetLoadingScreen() {
+    loading_start = anim_clock.elapsed();
+    loading_shown = 0;
+    status_key.clear();
+    status_prev.clear();
+    status_now.clear();
+}
+
 void Home::PaintLoading(QPainter& p, const QRect& area) {
-    // As in the launcher: the cover, the name, a bar and what is happening.
+    // Notos' own loading screen: the game's art far out of focus behind, wind crossing it, the
+    // emblem breathing inside a ring that fills as the game loads, the name and what is happening.
     const bool dark = Dark();
     const QColor bg = dark ? QColor(0x2B, 0x2B, 0x2E) : QColor(0xEC, 0xEC, 0xEC);
-    const QColor panel = dark ? QColor(0x3A, 0x3A, 0x3F) : QColor(0xD6, 0xD6, 0xDA);
     const QColor text = dark ? QColor(Qt::white) : QColor(Qt::black);
-    const QColor sub = dark ? QColor(0xA0, 0xA0, 0xA8) : QColor(0x6A, 0x6A, 0x72);
+    const QColor sub = dark ? QColor(0xC4, 0xC4, 0xCC) : QColor(0x4A, 0x4A, 0x52);
     const QColor accent = Accent();
     const double w = area.width();
     const double h = area.height();
@@ -1224,85 +1237,206 @@ void Home::PaintLoading(QPainter& p, const QRect& area) {
     p.setRenderHint(QPainter::Antialiasing);
     p.setRenderHint(QPainter::SmoothPixmapTransform);
     p.setRenderHint(QPainter::TextAntialiasing);
-    // Closing a game: the same screen comes in over it, the cover settling down.
-    const double show =
-        closing ? EaseOut((anim_clock.elapsed() - closing_start) / 450.0) : 1.0;
+    const double now = static_cast<double>(anim_clock.elapsed());
+    // Milliseconds on screen. Closing a game, the same screen comes in over it.
+    const double t = now - static_cast<double>(closing ? closing_start : loading_start);
+    const double show = EaseOut(t / 450.0);
     QColor backdrop = bg;
-    backdrop.setAlphaF(show);
+    backdrop.setAlphaF(closing ? show : 1.0);
     p.fillRect(QRectF(0, 0, w, h), backdrop);
+
+    // The game's cover over the whole screen, blurred to colours and toned to the theme. Built
+    // once (a little larger than the screen: it drifts).
+    const QString key = QStringLiteral("%1|%2x%3|%4")
+                            .arg(loading_game.native ? loading_game.exe : loading_game.path)
+                            .arg(area.width())
+                            .arg(area.height())
+                            .arg(dark);
+    if (key != loading_backdrop_key) {
+        loading_backdrop_key = key;
+        loading_backdrop = {};
+        if (!loading_game.cover.isNull() && w > 0 && h > 0) {
+            const QSize full(static_cast<int>(w * 1.12), static_cast<int>(h * 1.12));
+            QImage art = loading_game.cover.toImage()
+                             .scaled(QSize(64, 36), Qt::KeepAspectRatioByExpanding,
+                                     Qt::SmoothTransformation);
+            art = art.copy((art.width() - 64) / 2, (art.height() - 36) / 2, 64, 36)
+                      .scaled(QSize(16, 9), Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
+                      .scaled(QSize(160, 90), Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
+                      .scaled(full, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
+                      .convertToFormat(QImage::Format_ARGB32_Premultiplied);
+            QPainter tone(&art);
+            QColor veil = bg;
+            veil.setAlphaF(dark ? 0.62 : 0.70);
+            tone.fillRect(art.rect(), veil);
+            tone.end();
+            loading_backdrop = QPixmap::fromImage(art);
+        }
+    }
+    if (!loading_backdrop.isNull()) {
+        p.setOpacity(show);
+        const double dx = std::sin(now / 7000.0) * 0.045 * w;
+        const double dy = std::cos(now / 9000.0) * 0.040 * h;
+        p.drawPixmap(QPointF((w - loading_backdrop.width()) / 2.0 + dx,
+                             (h - loading_backdrop.height()) / 2.0 + dy),
+                     loading_backdrop);
+    }
+    p.setOpacity(1);
+
+    const QPointF centre(w / 2.0, h / 2.0 - 70 * s);
+    const double ring_r = 122 * s;
+
+    // Light behind the emblem, breathing.
+    {
+        const double breath = 0.82 + 0.18 * std::sin(now / 520.0);
+        QRadialGradient glow(centre, 620 * s);
+        QColor inner = accent;
+        inner.setAlphaF(0.30 * show * breath);
+        QColor mid = accent;
+        mid.setAlphaF(0.09 * show);
+        QColor outer = accent;
+        outer.setAlphaF(0);
+        glow.setColorAt(0, inner);
+        glow.setColorAt(0.45, mid);
+        glow.setColorAt(1, outer);
+        p.fillRect(QRectF(0, 0, w, h), glow);
+    }
+
+    // The south wind: long gusts crossing from the left, each on its own wave, and the dust they
+    // carry.
+    p.setBrush(Qt::NoBrush);
+    for (int i = 0; i < 9; ++i) {
+        const double a = std::fmod(i * 0.6180339887, 1.0);
+        const double b = std::fmod(i * 0.7548776662, 1.0);
+        const double c = std::fmod(i * 0.5698402910, 1.0);
+        const double u = std::fmod(now / (5200.0 + 5200.0 * a) + b, 1.0);
+        const double length = (0.22 + 0.25 * c) * w;
+        const double x1 = u * (w + length);
+        const double x0 = x1 - length;
+        const double base = h * (0.10 + 0.80 * std::fmod(i * 0.3819660113 + 0.07, 1.0));
+        const double swell = (14 + 26 * c) * s;
+        const double wave = (260 + 240 * a) * s;
+        QPainterPath gust;
+        for (int step = 0; step <= 28; ++step) {
+            const double x = x0 + length * step / 28.0;
+            const double y = base + swell * std::sin(x / wave + i * 1.7 + now / 2600.0);
+            if (step == 0) {
+                gust.moveTo(x, y);
+            } else {
+                gust.lineTo(x, y);
+            }
+        }
+        QColor colour = i % 3 == 0 ? accent : text;
+        colour.setAlphaF((0.14 + 0.22 * c) * show);
+        QColor clear = colour;
+        clear.setAlphaF(0);
+        QLinearGradient fade(QPointF(x0, 0), QPointF(x1, 0));
+        fade.setColorAt(0, clear);
+        fade.setColorAt(0.72, colour);
+        fade.setColorAt(1, clear);
+        p.setPen(QPen(QBrush(fade), (1.6 + 2.2 * c) * s, Qt::SolidLine, Qt::RoundCap,
+                      Qt::RoundJoin));
+        p.drawPath(gust);
+    }
+    p.setPen(Qt::NoPen);
+    for (int i = 0; i < 26; ++i) {
+        const double a = std::fmod(i * 0.6180339887 + 0.31, 1.0);
+        const double b = std::fmod(i * 0.7548776662 + 0.11, 1.0);
+        const double c = std::fmod(i * 0.5698402910 + 0.53, 1.0);
+        const double x = std::fmod(a + now / (7000.0 + 9000.0 * c), 1.0) * w * 1.1 - w * 0.05;
+        const double y = h * b + std::sin(x / (210 * s) + i) * 22 * s;
+        QColor speck = i % 3 == 0 ? accent : text;
+        speck.setAlphaF((0.10 + 0.32 * c) * show);
+        p.setBrush(speck);
+        const double r = (1.1 + 2.0 * c) * s;
+        p.drawEllipse(QPointF(x, y), r, r);
+    }
+
+    // Rings leaving the emblem, one after the other.
+    p.setBrush(Qt::NoBrush);
+    for (int ring = 0; ring < 2; ++ring) {
+        const double rt = std::fmod(now / 2800.0 + ring * 0.5, 1.0);
+        QColor colour = accent;
+        colour.setAlphaF(0.34 * (1 - rt) * (1 - rt) * show);
+        p.setPen(QPen(colour, (2.6 - 1.8 * rt) * s));
+        const double radius = ring_r + EaseOut(rt) * 250 * s;
+        p.drawEllipse(centre, radius, radius);
+    }
+
+    // The ring: the share loaded, or an arc going round while nobody knows.
+    const QRectF ring_rect(centre.x() - ring_r, centre.y() - ring_r, 2 * ring_r, 2 * ring_r);
     p.setOpacity(show);
-    const int phase = closing ? static_cast<int>(anim_clock.elapsed() / 33) : loading_phase;
-
-    const double size = std::round(std::clamp(h * 0.5, 160.0, 520.0) * (1.12 - 0.12 * show));
-    const QFont name_font = Font(font(), 28 * s, QFont::DemiBold);
-    const QFont status_font = Font(font(), 16 * s);
-    const double name_h = QFontMetricsF(name_font).height();
-    const double status_h = QFontMetricsF(status_font).height();
-    const double gap = 24 * s;
-    const double bar_h = 8 * s;
-    const double block = size + gap + name_h + gap + bar_h + 14 * s + status_h;
-    double y = (h - block) / 2;
-
-    // Cover.
-    const QRectF cover((w - size) / 2, y, size, size);
-    QPainterPath clip;
-    clip.addRoundedRect(cover, 8 * s, 8 * s);
-    p.setPen(Qt::NoPen);
-    p.setBrush(panel);
-    p.drawPath(clip);
-    if (!loading_game.cover.isNull()) {
-        p.save();
-        p.setClipPath(clip);
-        const QPixmap scaled =
-            loading_game.cover.scaled(cover.size().toSize(), Qt::KeepAspectRatioByExpanding,
-                                      Qt::SmoothTransformation);
-        p.drawPixmap(QPointF(cover.center().x() - scaled.width() / 2.0,
-                             cover.center().y() - scaled.height() / 2.0),
-                     scaled);
-        p.restore();
-    } else {
-        p.setPen(text);
-        p.setFont(name_font);
-        p.drawText(cover.adjusted(16 * s, 16 * s, -16 * s, -16 * s),
-                   Qt::AlignCenter | Qt::TextWordWrap, loading_game.name);
-    }
-    y += size + gap;
-
-    // Name.
-    p.setPen(text);
-    p.setFont(name_font);
-    p.drawText(QRectF(32 * s, y, w - 64 * s, name_h), Qt::AlignCenter,
-               QFontMetricsF(name_font).elidedText(loading_game.name, Qt::ElideRight,
-                                                   w - 64 * s));
-    y += name_h + gap;
-
-    // Bar: the share done, or a block running along it while nobody knows.
-    const double track_w = std::min(size * 1.4, w - 64 * s);
-    const QRectF track((w - track_w) / 2, y, track_w, bar_h);
-    p.setPen(Qt::NoPen);
-    p.setBrush(panel);
-    p.drawRoundedRect(track, bar_h / 2, bar_h / 2);
-    p.setBrush(accent);
+    QColor track = text;
+    track.setAlphaF(0.14);
+    p.setPen(QPen(track, 6 * s));
+    p.drawEllipse(ring_rect);
+    QPen arc(AccentBrush(ring_rect), 6 * s, Qt::SolidLine, Qt::RoundCap);
+    p.setPen(arc);
     if (loading_progress >= 0) {
-        if (loading_progress > 0) {
-            p.drawRoundedRect(QRectF(track.left(), track.top(), track_w * loading_progress, bar_h),
-                              bar_h / 2, bar_h / 2);
-        }
+        loading_shown += (loading_progress - loading_shown) * 0.14;
+        const double span = std::max(1.5, 360.0 * std::clamp(loading_shown, 0.0, 1.0));
+        p.drawArc(ring_rect, 90 * 16, -static_cast<int>(span * 16));
     } else {
-        const double at = (phase % 60) / 60.0 * 1.3 - 0.3;
-        const double left = std::max(track.left(), track.left() + track_w * at);
-        const double right = std::min(track.right(), track.left() + track_w * (at + 0.3));
-        if (right > left) {
-            p.drawRoundedRect(QRectF(left, track.top(), right - left, bar_h), bar_h / 2,
-                              bar_h / 2);
-        }
+        loading_shown = 0;
+        const double turn = std::fmod(now * 0.21, 360.0);
+        const double span = 80 + 45 * std::sin(now / 640.0);
+        p.drawArc(ring_rect, static_cast<int>((90 - turn) * 16), -static_cast<int>(span * 16));
     }
-    y += bar_h + 14 * s;
 
-    // What is happening.
-    p.setPen(sub);
-    p.setFont(status_font);
-    p.drawText(QRectF(32 * s, y, w - 64 * s, status_h), Qt::AlignCenter, loading_status);
+    // The emblem, settling into place and breathing.
+    {
+        const double big = 150 * s * (1.14 - 0.14 * show) * (1 + 0.022 * std::sin(now / 520.0));
+        const QPixmap icon = window->windowIcon().pixmap(256);
+        p.drawPixmap(QRectF(centre.x() - big / 2, centre.y() - big / 2, big, big), icon,
+                     QRectF(icon.rect()));
+    }
+
+    // The game's name, its letters settling together.
+    double y = centre.y() + ring_r + 44 * s;
+    {
+        const double word = EaseOut((t - 120) / 650.0);
+        QFont name_font = Font(font(), 30 * s, QFont::DemiBold);
+        name_font.setLetterSpacing(QFont::AbsoluteSpacing, (1 + 16 * (1 - word)) * s);
+        const QFontMetricsF metrics(name_font);
+        QColor colour = text;
+        colour.setAlphaF(word);
+        p.setOpacity(show);
+        p.setPen(colour);
+        p.setFont(name_font);
+        p.drawText(QRectF(32 * s, y, w - 64 * s, metrics.height()), Qt::AlignCenter,
+                   metrics.elidedText(loading_game.name, Qt::ElideRight, w - 64 * s));
+        y += metrics.height() + 12 * s;
+    }
+
+    // What is happening: a new step fades in over the last one (a count going up just changes).
+    {
+        QString step_key;
+        for (const QChar ch : loading_status) {
+            if (!ch.isDigit()) {
+                step_key.append(ch);
+            }
+        }
+        if (step_key != status_key) {
+            status_key = step_key;
+            status_prev = status_now;
+            status_changed = anim_clock.elapsed();
+        }
+        status_now = loading_status;
+        const double f = EaseOut((now - static_cast<double>(status_changed)) / 320.0);
+        const QFont status_font = Font(font(), 21 * s);
+        const double status_h = QFontMetricsF(status_font).height();
+        p.setFont(status_font);
+        p.setPen(sub);
+        if (f < 1 && !status_prev.isEmpty()) {
+            p.setOpacity(show * (1 - f));
+            p.drawText(QRectF(32 * s, y - 8 * s * f, w - 64 * s, status_h), Qt::AlignCenter,
+                       status_prev);
+        }
+        p.setOpacity(show * f);
+        p.drawText(QRectF(32 * s, y + 8 * s * (1 - f), w - 64 * s, status_h), Qt::AlignCenter,
+                   status_now);
+    }
+    p.setOpacity(show);
 
     if (closing) {
         p.restore();
@@ -1924,6 +2058,9 @@ void Home::paintEvent(QPaintEvent*) {
     if (focus.size() != games.size()) {
         focus.assign(games.size(), 0.0);
     }
+    // Choosing a game: its cover is drawn again over the fading screen, answering.
+    const double lt = launching ? static_cast<double>(anim_clock.elapsed() - launch_start) : -1;
+    bool launch_pass = false;
     const auto draw_tile = [&](int i) {
         const double x = left + i * cell - scroll + TileGap * s;
         if (x + outer * 1.1 < 0 || x - outer * 0.1 > w) {
@@ -1936,6 +2073,20 @@ void Home::paintEvent(QPaintEvent*) {
         const double grown = outer * 0.075 * lift / 2;
         QRectF outer_rect = rest.adjusted(-grown, -grown, grown, grown);
         double tile_opacity = ui;
+        if (launch_pass) {
+            // Pressed like a button, then it springs out a little larger and settles.
+            double scale = 1;
+            if (lt < 90) {
+                scale = 1 - 0.06 * EaseOut(lt / 90.0);
+            } else if (lt < 300) {
+                scale = 0.94 + 0.13 * EaseOut((lt - 90) / 210.0);
+            } else {
+                scale = 1.07 - 0.03 * EaseInOut((lt - 300) / 180.0);
+            }
+            const double more = outer_rect.width() * (scale - 1) / 2;
+            outer_rect.adjust(-more, -more, more, more);
+            tile_opacity = 1 - Clamp01((lt - (LaunchTime - 130)) / 110.0); // into the loading screen
+        }
         if (intro) {
             // The covers come in from the right, one after the other.
             const double order = std::max(0.0, (x - left) / cell);
@@ -2002,6 +2153,21 @@ void Home::paintEvent(QPaintEvent*) {
                        Qt::AlignCenter | (long_word ? Qt::TextWrapAnywhere : Qt::TextWordWrap),
                        game.name);
         }
+        if (launch_pass) {
+            // A shine crosses the cover.
+            const double sweep = (lt - 100) / 320.0;
+            if (sweep > 0 && sweep < 1) {
+                const double band = face.width() * 0.55;
+                const double x0 = face.left() - band + (face.width() + band) * EaseInOut(sweep);
+                QLinearGradient shine(QPointF(x0, face.top()),
+                                      QPointF(x0 + band, face.top() + band * 0.45));
+                shine.setColorAt(0, QColor(255, 255, 255, 0));
+                shine.setColorAt(0.5, QColor(255, 255, 255,
+                                             static_cast<int>(150 * std::sin(sweep * 3.14159))));
+                shine.setColorAt(1, QColor(255, 255, 255, 0));
+                p.fillRect(face, shine);
+            }
+        }
         // The platform, in a small badge in the cover's corner.
         {
             p.setFont(Font(font(), tile / 19.0 * k, QFont::Bold));
@@ -2020,6 +2186,20 @@ void Home::paintEvent(QPaintEvent*) {
             p.drawText(badge, Qt::AlignCenter, platform);
         }
         p.restore();
+        if (launch_pass) {
+            // Its border leaves it, as a ring of light.
+            const double rt = (lt - 130) / 340.0;
+            if (rt > 0 && rt < 1) {
+                const double grow = EaseOut(rt) * 46 * s;
+                p.setOpacity(tile_opacity * 0.75 * (1 - rt) * (1 - rt));
+                p.setPen(QPen(AccentBrush(outer_rect), (4.5 - 3.0 * rt) * s));
+                p.setBrush(Qt::NoBrush);
+                p.drawRoundedRect(outer_rect.adjusted(-grow, -grow, grow, grow), 4 * s + grow,
+                                  4 * s + grow);
+                p.setOpacity(tile_opacity);
+            }
+            return;
+        }
         // Under the cover: a clock and the time played (nothing for a game never played).
         if (const QString text = PlayTimeText(PlayTimeOf(game)); !text.isEmpty()) {
             p.save();
@@ -2129,6 +2309,18 @@ void Home::paintEvent(QPaintEvent*) {
                HintSize * 0.8 * s, text);
 
     p.setOpacity(1);
+    if (launching) {
+        // Everything fades to the loading screen's ground; the chosen cover stays over it.
+        QColor veil = bg;
+        veil.setAlphaF(EaseOut(lt / 260.0));
+        p.fillRect(rect(), veil);
+        if (launch_index >= 0 && launch_index < static_cast<int>(games.size())) {
+            launch_pass = true;
+            draw_tile(launch_index);
+            launch_pass = false;
+        }
+        p.setOpacity(1);
+    }
     PaintMenu(p, rect());
 }
 
@@ -2424,7 +2616,7 @@ void Home::keyPressEvent(QKeyEvent* event) {
 }
 
 void Home::Nav(const QString& cmd) {
-    if (closing) {
+    if (closing || launching) {
         return;
     }
     if (intro_start >= 0 && !intro_reveal_only) {
@@ -2515,7 +2707,7 @@ void Home::Nav(const QString& cmd) {
                 MultiplayerMenu();
             }
         } else if (row == 0 && !games.empty()) {
-            Launch(games[game_index]);
+            BeginLaunch(games[game_index]);
         } else if (row == 1) {
             switch (button_index) {
             case 0:
@@ -2591,7 +2783,7 @@ void Home::MenuMouse(const QPoint& pos, Qt::MouseButton button) {
 
 void Home::mousePressEvent(QMouseEvent* event) {
     pad_last = false;
-    if (loading) {
+    if (loading || launching) {
         return;
     }
     const QPoint pos = event->position().toPoint();
@@ -2621,7 +2813,7 @@ void Home::mousePressEvent(QMouseEvent* event) {
         if (event->button() == Qt::RightButton) {
             GameMenu();
         } else if (again) {
-            Launch(games[i]);
+            BeginLaunch(games[i]);
         }
         return;
     }
@@ -2638,11 +2830,11 @@ void Home::mousePressEvent(QMouseEvent* event) {
 
 void Home::mouseDoubleClickEvent(QMouseEvent* event) {
     const QPoint pos = event->position().toPoint();
-    if (!loading && menu.empty() && event->button() == Qt::LeftButton) {
+    if (!loading && !launching && menu.empty() && event->button() == Qt::LeftButton) {
         for (int i = 0; i < static_cast<int>(tile_rects.size()); ++i) {
             if (tile_rects[i].contains(pos)) {
                 game_index = i;
-                Launch(games[i]);
+                BeginLaunch(games[i]);
                 return;
             }
         }
@@ -2651,7 +2843,7 @@ void Home::mouseDoubleClickEvent(QMouseEvent* event) {
 }
 
 void Home::wheelEvent(QWheelEvent* event) {
-    if (loading || !menu.empty() || games.empty()) {
+    if (loading || launching || !menu.empty() || games.empty()) {
         return;
     }
     const int steps = event->angleDelta().y() != 0 ? event->angleDelta().y() : event->angleDelta().x();
@@ -2752,6 +2944,41 @@ void Home::PollPad() {
 }
 
 // ---- launching
+
+void Home::BeginLaunch(const Game& game) {
+    if (loading || launching) {
+        return;
+    }
+    launch_index = -1;
+    for (int i = 0; i < static_cast<int>(games.size()); ++i) {
+        if (games[i].native == game.native &&
+            (game.native ? games[i].exe == game.exe : games[i].path == game.path)) {
+            launch_index = i;
+        }
+    }
+    if (launch_index < 0 || !isVisible()) {
+        Launch(game); // not on screen: nothing to animate
+        return;
+    }
+    launch_game = game;
+    launching = true;
+    launch_start = anim_clock.elapsed();
+    sounds.Play(QStringLiteral("select"));
+    update();
+    QTimer::singleShot(LaunchTime, this, [this] {
+        if (!launching) {
+            return;
+        }
+        // Still "launching" while the game starts: the screen stays faded until the loading
+        // screen takes over (or comes back, if the game could not start).
+        const Game game = launch_game;
+        Launch(game);
+        launching = false;
+        launch_index = -1;
+        launch_game = {};
+        update();
+    });
+}
 
 void Home::Launch(const Game& game) {
     if (loading) {
@@ -2863,6 +3090,7 @@ void Home::LaunchNative(const Game& game) {
     loading_phase = 0;
     loading_progress = -1;
     loading_status = QStringLiteral("Iniciando…");
+    ResetLoadingScreen();
     launch_time = QDateTime::currentDateTime();
     loading_timer->start();
     update();
@@ -3216,7 +3444,7 @@ void Home::Message(const QString& text) {
 bool Home::Idle() const {
     const bool game = hooks.emulation_running && hooks.emulation_running();
     return isVisible() && !intro_pending && intro_start < 0 && menu.empty() && !loading &&
-           !closing && !game;
+           !launching && !closing && !game;
 }
 
 void Home::OfferUpdate(const QString& version, std::function<void()> install,
@@ -3379,7 +3607,7 @@ void Home::GameMenu() {
     const Game game = games[game_index];
     std::vector<Entry> entries;
     entries.push_back(
-        Entry{[] { return QStringLiteral("Jugar"); }, [this, game] { Launch(game); }, {}, true});
+        Entry{[] { return QStringLiteral("Jugar"); }, [this, game] { BeginLaunch(game); }, {}, true});
     if (game.native) {
         const int index = NativeIndex(game);
         entries.push_back(Entry{[] { return QStringLiteral("Cambiar nombre"); },
