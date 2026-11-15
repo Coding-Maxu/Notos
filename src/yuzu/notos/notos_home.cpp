@@ -1893,7 +1893,8 @@ void Home::paintEvent(QPaintEvent*) {
     const double tile = Tile * s;
     const double outer = tile + 2 * (TileBorder + TilePad) * s;
     const double cell = outer + 2 * TileGap * s;
-    const double title_h = TitleSize * 1.5 * s + 12 * s;
+    const double info_h = HintSize * 1.4 * s;
+    const double title_h = TitleSize * 1.5 * s + info_h + 12 * s;
     const double label_h = HintSize * 1.5 * s;
     const double area_top = TopBar * s;
     const double area_bottom = h - (IconRow + BottomBar) * s;
@@ -1908,6 +1909,13 @@ void Home::paintEvent(QPaintEvent*) {
         p.drawText(title_rect, Qt::AlignLeft | Qt::AlignVCenter,
                    p.fontMetrics().elidedText(games[game_index].name, Qt::ElideRight,
                                               static_cast<int>(title_rect.width())));
+        // Under it: "Switch · Jugado hace 2 días · 3 h 22 min".
+        p.setPen(sub);
+        p.setFont(Font(font(), HintSize * s));
+        const QRectF info_rect(title_rect.left(), title_rect.bottom(), title_rect.width(), info_h);
+        p.drawText(info_rect, Qt::AlignLeft | Qt::AlignVCenter,
+                   p.fontMetrics().elidedText(InfoLine(games[game_index]), Qt::ElideRight,
+                                              static_cast<int>(info_rect.width())));
     }
 
     tile_rects.assign(games.size(), QRect());
@@ -1994,12 +2002,28 @@ void Home::paintEvent(QPaintEvent*) {
                        Qt::AlignCenter | (long_word ? Qt::TextWrapAnywhere : Qt::TextWordWrap),
                        game.name);
         }
-        p.restore();
-        // Under the cover: a clock and the time played.
+        // The platform, in a small badge in the cover's corner.
         {
+            p.setFont(Font(font(), tile / 19.0 * k, QFont::Bold));
+            const QString platform = PlatformOf(game);
+            const QFontMetricsF metrics(p.font());
+            const double pad_x = metrics.height() * 0.45;
+            const QRectF badge(face.left() + tile / 28 * k, face.bottom() - tile / 28 * k -
+                                   metrics.height() * 1.25,
+                               metrics.horizontalAdvance(platform) + 2 * pad_x,
+                               metrics.height() * 1.25);
+            p.setRenderHint(QPainter::Antialiasing);
+            p.setPen(Qt::NoPen);
+            p.setBrush(QColor(0, 0, 0, 165));
+            p.drawRoundedRect(badge, badge.height() / 2, badge.height() / 2);
+            p.setPen(Qt::white);
+            p.drawText(badge, Qt::AlignCenter, platform);
+        }
+        p.restore();
+        // Under the cover: a clock and the time played (nothing for a game never played).
+        if (const QString text = PlayTimeText(PlayTimeOf(game)); !text.isEmpty()) {
             p.save();
             p.setFont(Font(font(), HintSize * s, QFont::Medium));
-            const QString text = PlayTimeText(PlayTimeOf(game));
             const QFontMetricsF metrics(p.font());
             const double icon = metrics.ascent() * 0.95;
             const double gap = icon * 0.45;
@@ -3083,9 +3107,51 @@ u64 Home::PlayTimeOf(const Game& game) const {
     return hooks.play_time && game.program_id != 0 ? hooks.play_time(game.program_id) : 0;
 }
 
+QString Home::PlatformOf(const Game& game) {
+    if (game.native) {
+        return game.exe.startsWith(QStringLiteral("steam://")) ? QStringLiteral("Steam")
+                                                               : QStringLiteral("PC");
+    }
+    // Switch 2 titles have 04... program ids (Switch ones 01...); a .nup is always one.
+    const bool switch2 = (game.program_id >> 56) == 0x04 ||
+                         game.path.endsWith(QStringLiteral(".nup"), Qt::CaseInsensitive);
+    return switch2 ? QStringLiteral("Switch 2") : QStringLiteral("Switch");
+}
+
+QString Home::InfoLine(const Game& game) const {
+    QStringList parts{PlatformOf(game)};
+    const qint64 when = static_cast<qint64>(config.value(QStringLiteral("lastPlayed"))
+                                                .toObject()
+                                                .value(game.native ? game.exe : game.path)
+                                                .toDouble());
+    if (when > 0) {
+        const qint64 days =
+            QDateTime::fromSecsSinceEpoch(when).date().daysTo(QDate::currentDate());
+        if (days <= 0) {
+            parts << QStringLiteral("Jugado hoy");
+        } else if (days == 1) {
+            parts << QStringLiteral("Jugado ayer");
+        } else if (days < 30) {
+            parts << QStringLiteral("Jugado hace %1 días").arg(days);
+        } else if (days < 365) {
+            const qint64 months = days / 30;
+            parts << (months == 1 ? QStringLiteral("Jugado hace 1 mes")
+                                  : QStringLiteral("Jugado hace %1 meses").arg(months));
+        } else {
+            const qint64 years = days / 365;
+            parts << (years == 1 ? QStringLiteral("Jugado hace 1 año")
+                                 : QStringLiteral("Jugado hace %1 años").arg(years));
+        }
+    }
+    if (const QString time = PlayTimeText(PlayTimeOf(game)); !time.isEmpty()) {
+        parts << time;
+    }
+    return parts.join(QStringLiteral(" · "));
+}
+
 QString Home::PlayTimeText(u64 seconds) {
     if (seconds < 60) {
-        return QStringLiteral("Sin jugar");
+        return {};
     }
     const u64 hours = seconds / 3600;
     const u64 minutes = seconds % 3600 / 60;

@@ -240,7 +240,10 @@ private:
     void RemoveNative(int index);
     int NativeIndex(const Game& game) const;
     u64 PlayTimeOf(const Game& game) const;
-    static QString PlayTimeText(u64 seconds);
+    static QString PlayTimeText(u64 seconds); ///< empty: never played
+    static QString PlatformOf(const Game& game); ///< Switch, Switch 2, Steam or PC
+    /// Under the title: platform, when it was last played and the time played.
+    QString InfoLine(const Game& game) const;
 
     QMainWindow* window;
     QWidget* game_list;
