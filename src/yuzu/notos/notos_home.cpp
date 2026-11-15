@@ -57,6 +57,7 @@
 #include <SDL3/SDL.h>
 
 #include "common/fs/path_util.h"
+#include "common/logging.h"
 #include "hid_core/frontend/emulated_controller.h"
 #include "qt_common/game_list/game_list_p.h"
 #include "qt_common/qt_common.h"
@@ -1028,6 +1029,7 @@ void Home::EndClosing() {
     if (!closing) {
         return;
     }
+    LOG_INFO(Frontend, "Notos: closing screen ends");
     // Long enough to be read, even when the game is gone at once.
     const qint64 shown = anim_clock.elapsed() - closing_start;
     if (shown < 800) {
@@ -1242,7 +1244,8 @@ void Home::PaintLoading(QPainter& p, const QRect& area) {
     const double t = now - static_cast<double>(closing ? closing_start : loading_start);
     const double show = EaseOut(t / 450.0);
     QColor backdrop = bg;
-    backdrop.setAlphaF(closing ? show : 1.0);
+    // Over a game (the Home menu's window) it fades in; in Notos' own window it is the ground.
+    backdrop.setAlphaF(closing && closing_emulated ? show : 1.0);
     p.fillRect(QRectF(0, 0, w, h), backdrop);
 
     // The game's cover over the whole screen, blurred to colours and toned to the theme. Built
@@ -1463,8 +1466,13 @@ Overlay::Overlay(Home* home_) : QWidget(home_->window, OverlayFlags), home{home_
 
 void Overlay::paintEvent(QPaintEvent*) {
     QPainter p(this);
-    if (home->loading || home->closing) {
+    // A native game's loading and closing screens are Notos' own window, never this one.
+    if ((home->loading && home->loading_emulated) || (home->closing && home->closing_emulated)) {
         home->PaintLoading(p, rect());
+        return;
+    }
+    if (home->loading || home->closing) {
+        return;
     } else {
         home->PaintMenu(p, rect());
     }
@@ -1631,6 +1639,7 @@ void Home::NativeMenuEntries() {
                             Entry{[] { return QStringLiteral("Sí, cerrar"); },
                                   [this] {
                                       LeaveGameMenu(false);
+                                      overlay->hide(); // also after being re-parented
                                       CloseNative();
                                       // Notos comes back over it with the closing screen.
                                       StartClosing(false);
@@ -1687,9 +1696,17 @@ void Home::CloseNative() {
             return TRUE;
         },
         reinterpret_cast<LPARAM>(&close));
+    LOG_INFO(Frontend, "Notos: closing native game {} (pid {})", native_name.toStdString(),
+             close.pid);
+    // Out of the way while it closes: a fullscreen game keeps the screen until it lets it go,
+    // and Notos' closing screen would show frozen over it.
+    if (HWND game_window = NativeWindow(native_process)) {
+        ShowWindowAsync(game_window, SW_MINIMIZE);
+    }
     HANDLE process = native_process;
     QTimer::singleShot(5000, this, [this, process] {
         if (native_process == process && WaitForSingleObject(process, 0) == WAIT_TIMEOUT) {
+            LOG_WARNING(Frontend, "Notos: native game still running after 5 s, ending it");
             TerminateProcess(process, 0);
         }
     });
@@ -3101,6 +3118,8 @@ void Home::LaunchNative(const Game& game) {
 
 void Home::NativeEnded() {
     const bool was_closing = closing;
+    LOG_INFO(Frontend, "Notos: native game ended (closing screen: {}, Notos minimized: {})",
+             was_closing, window->isMinimized());
     if (loading && !loading_emulated) {
         EndLoading();
     }
