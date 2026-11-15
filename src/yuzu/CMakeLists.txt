@@ -286,6 +286,12 @@ add_custom_command(TARGET yuzu POST_BUILD
         "${PROJECT_SOURCE_DIR}/dist/recipes" "$<TARGET_FILE_DIR:yuzu>/recipes"
     VERBATIM)
 
+# Notos: the home screen's sounds (made by tools/notos-sounds.js), next to the exe (notos_home.cpp).
+add_custom_command(TARGET yuzu POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${PROJECT_SOURCE_DIR}/dist/notos_music" "$<TARGET_FILE_DIR:yuzu>/notos_music"
+    VERBATIM)
+
 if (YUZU_CRASH_DUMPS)
     target_sources(yuzu PRIVATE
         breakpad.cpp

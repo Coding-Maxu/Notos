@@ -188,7 +188,11 @@ void Sounds::Load(const QString& dir) {
     if (!impl->started) {
         return;
     }
-    const QFileInfoList files = QDir(dir).entryInfoList(QDir::Files, QDir::Name);
+    QFileInfoList files = QDir(dir).entryInfoList(QDir::Files, QDir::Name);
+    // Notos' own .wav first: an older version's .mp3 of the same name may still be there.
+    std::stable_partition(files.begin(), files.end(), [](const QFileInfo& file) {
+        return file.suffix().compare(QStringLiteral("wav"), Qt::CaseInsensitive) == 0;
+    });
     for (const QFileInfo& file : files) {
         const QString name = file.completeBaseName().toLower();
         if (impl->clips.contains(name)) {

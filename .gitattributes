@@ -6,3 +6,4 @@ dist/qt_themes/* linguist-vendored
 externals/* linguist-vendored
 *.h linguist-language=cpp
 *.nx2recipe binary
+*.wav binary
